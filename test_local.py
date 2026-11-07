@@ -155,6 +155,41 @@ try:
           == [("Main", "B"), ("Main", "A")],
           str([(w["schedule_name"], w["day_label"]) for w in b["workouts"]]))
 
+    # --- history editing: change a saved set, incl. cross-user refusal ---
+    s, b = call("GET", "/api/history", headers=H)
+    a_workout = [w for w in b["workouts"] if w["day_label"] == "A"][0]
+    set0 = a_workout["entries"][0]
+    check("history entries expose set id", isinstance(set0.get("id"), int))
+    s, b = call("PUT", f"/api/workout-sets/{set0['id']}",
+                {"exercise_name": "Bench Press", "weight": 105.5, "reps": 6}, H)
+    check("edit history set", b.get("ok") and b["entry"]["weight"] == 105.5
+          and b["entry"]["reps"] == 6
+          and b["entry"]["exercise_name"] == "Bench Press", str(b)[:160])
+    s, b = call("PUT", f"/api/workout-sets/{set0['id']}",
+                {"exercise_name": "Bench Press", "weight": -5, "reps": 6}, H)
+    check("negative weight refused", s == 400)
+    s, b = call("PUT", f"/api/workout-sets/{set0['id']}",
+                {"exercise_name": "X", "weight": 1, "reps": 1},
+                {"Content-Type": "application/json"})
+    check("edit history requires auth", s == 401)
+    db = sqlite3.connect(scratch + "/lift.db")
+    db.execute("INSERT INTO users(sub,email,name,picture,created_at)"
+               " VALUES('s2','u2@t','Other','','2026-01-01')")
+    tok2 = secrets.token_urlsafe(32)
+    db.execute("INSERT INTO sessions(token_hash,user_id,created_at,expires_at)"
+               " VALUES(?,2,'2026-01-01','2999-01-01')",
+               (hashlib.sha256(tok2.encode()).hexdigest(),))
+    db.commit(); db.close()
+    H2 = {"Cookie": f"lift_session={tok2}", "Content-Type": "application/json"}
+    s, b = call("PUT", f"/api/workout-sets/{set0['id']}",
+                {"exercise_name": "Hacked", "weight": 1, "reps": 1}, H2)
+    check("other user's set not editable (404)", s == 404)
+    s, b = call("GET", "/api/history", headers=H)
+    a_workout = [w for w in b["workouts"] if w["day_label"] == "A"][0]
+    check("edited values persist in history",
+          a_workout["entries"][0]["weight"] == 105.5
+          and a_workout["entries"][0]["exercise_name"] == "Bench Press")
+
     # --- delete rules ---
     s, b = call("DELETE", f"/api/schedules/{copy_id}", headers=H)
     check("delete copy ok", b.get("ok"))

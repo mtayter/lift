@@ -640,28 +640,75 @@ $('modal-save').onclick = async () => {
 };
 
 /* ---------- HISTORY ---------- */
+let histWorkouts = [];
+let editingSetId = null;   // workout_sets.id currently being edited, if any
+
 async function loadHistory() {
   const r = await api('/history');
+  histWorkouts = r.body.workouts || [];
+  editingSetId = null;
+  renderHistory();
+}
+function renderHistory() {
   const list = $('history-list');
-  if (!r.body.workouts || !r.body.workouts.length) {
+  if (!histWorkouts.length) {
     list.innerHTML = '<div class="empty-note">No workouts yet. Your saved workouts will show up here, newest first.</div>';
     return;
   }
   list.innerHTML = '';
-  for (const w of r.body.workouts) {
+  for (const w of histWorkouts) {
     const card = document.createElement('div'); card.className = 'hist-card';
-    const rows = w.entries.map(e => `
-      <div class="hrow"><span class="hn">${e.seq + 1}</span><span>${esc(e.exercise_name) || '(unnamed)'}${e.group_mode ? ' <span class="ss-tag">SS</span>' : ''}</span>
-      <span class="hv">${e.weight != null ? e.weight : '—'} × ${e.reps != null ? e.reps : '—'}</span></div>`).join('');
-    card.innerHTML = `
-      <div class="hist-head"><span class="hist-day">Day ${w.day_label}</span>
+    const head = document.createElement('div'); head.className = 'hist-head';
+    head.innerHTML = `<span class="hist-day">Day ${w.day_label}</span>
       <span class="hist-date">${fmtDate(w.date)}</span>
       ${w.schedule_name ? `<span class="badge sched">${esc(w.schedule_name)}</span>` : ''}
       ${w.ended_early ? '<span class="badge">ENDED EARLY</span>' : ''}
-      <span class="muted">${w.entries.length} sets</span></div>
-      <div class="hist-sets">${rows || '<span class="muted">No sets recorded</span>'}</div>`;
+      <span class="muted">${w.entries.length} sets</span>`;
+    card.appendChild(head);
+    const sets = document.createElement('div'); sets.className = 'hist-sets';
+    if (!w.entries.length) sets.innerHTML = '<span class="muted">No sets recorded</span>';
+    for (const e of w.entries) sets.appendChild(histRowEl(e));
+    card.appendChild(sets);
     list.appendChild(card);
   }
+}
+function histRowEl(e) {
+  const row = document.createElement('div');
+  row.className = 'hrow' + (editingSetId === e.id ? ' editing' : '');
+  if (editingSetId !== e.id) {
+    row.innerHTML = `<span class="hn">${e.seq + 1}</span><span>${esc(e.exercise_name) || '(unnamed)'}${e.group_mode ? ' <span class="ss-tag">SS</span>' : ''}</span>
+      <span class="hv">${e.weight != null ? e.weight : '—'} × ${e.reps != null ? e.reps : '—'}</span>`;
+    row.title = 'Tap to edit';
+    row.onclick = () => { editingSetId = e.id; renderHistory(); };
+    return row;
+  }
+  // editing: row becomes text boxes with Save next to it
+  row.innerHTML = `<span class="hn">${e.seq + 1}</span>
+    <input class="hname" type="text" value="${esc(e.exercise_name)}" placeholder="Exercise" autocomplete="off" aria-label="Exercise name">
+    <input class="hnum hw" type="number" inputmode="decimal" step="any" min="0" value="${e.weight != null ? e.weight : ''}" placeholder="wt" aria-label="Weight">
+    <input class="hnum hr" type="number" inputmode="numeric" step="1" min="0" value="${e.reps != null ? e.reps : ''}" placeholder="reps" aria-label="Reps">
+    <button class="hbtn save">Save</button>
+    <button class="hbtn cancel">Cancel</button>`;
+  row.querySelector('.cancel').onclick = () => { editingSetId = null; renderHistory(); };
+  row.querySelector('.save').onclick = async () => {
+    const payload = {
+      exercise_name: row.querySelector('.hname').value,
+      weight: row.querySelector('.hw').value === '' ? null : Number(row.querySelector('.hw').value),
+      reps: row.querySelector('.hr').value === '' ? null : Number(row.querySelector('.hr').value)
+    };
+    const r = await api('/workout-sets/' + e.id, jsonOpts('PUT', payload));
+    if (r.body.ok) {
+      e.exercise_name = r.body.entry.exercise_name;
+      e.weight = r.body.entry.weight;
+      e.reps = r.body.entry.reps;
+      editingSetId = null;
+      renderHistory();
+      toast('History updated ✓');
+    } else {
+      toast('Save failed: ' + (r.body.error || 'unknown error'));
+    }
+  };
+  return row;
 }
 
 /* ---------- boot ---------- */

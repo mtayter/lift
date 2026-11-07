@@ -32,6 +32,8 @@ Routes (an optional /lift prefix is stripped):
   POST   /api/workouts            {schedule_id, day_index, date, entries,
                                    ended_early}                           (auth)
   GET    /api/history             -> all workouts, newest first           (auth)
+  PUT    /api/workout-sets/<id>   {exercise_name, weight, reps} -> edit
+           one saved set in History (owner only)                          (auth)
 """
 import copy as _copy
 import hashlib
@@ -318,8 +320,8 @@ def linked_exercise_ids(uid, sid):
 def workout_to_json(w):
     with db_lock:
         sets = db.execute(
-            "SELECT seq, step_index, exercise_id, exercise_name, set_number,"
-            " group_id, group_mode, weight, reps FROM workout_sets"
+            "SELECT id, seq, step_index, exercise_id, exercise_name,"
+            " set_number, group_id, group_mode, weight, reps FROM workout_sets"
             " WHERE workout_id=? ORDER BY seq", (w["id"],)).fetchall()
     return {"id": w["id"], "schedule_id": w["schedule_id"],
             "schedule_name": w["schedule_name"],
@@ -657,6 +659,48 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         path = self._strip_prefix(urllib.parse.urlparse(self.path).path)
+        if path.startswith("/api/workout-sets/"):
+            uid = self._session_user()
+            if not uid:
+                return self._json(401, {"ok": False})
+            try:
+                set_id = int(path.split("/")[3])
+            except (IndexError, ValueError):
+                return self._json(404, {"ok": False})
+            with db_lock:
+                owner = db.execute(
+                    "SELECT w.user_id FROM workout_sets ws"
+                    " JOIN workouts w ON w.id = ws.workout_id"
+                    " WHERE ws.id=?", (set_id,)).fetchone()
+            if not owner or owner["user_id"] != uid:
+                return self._json(404, {"ok": False})
+            p = self._json_body()
+            if p is None:
+                return self._json(400, {"ok": False})
+
+            def num(v, cast):
+                try:
+                    return cast(v) if v not in (None, "") else None
+                except (TypeError, ValueError):
+                    return "BAD"
+            weight = num(p.get("weight"), float)
+            reps = num(p.get("reps"), int)
+            name = str(p.get("exercise_name", ""))[:100]
+            if weight == "BAD" or reps == "BAD":
+                return self._json(400, {"ok": False,
+                                        "error": "weight/reps must be numbers"})
+            if (weight is not None and weight < 0) or \
+               (reps is not None and reps < 0):
+                return self._json(400, {"ok": False,
+                                        "error": "weight/reps can't be negative"})
+            with db_lock:
+                db.execute(
+                    "UPDATE workout_sets SET exercise_name=?, weight=?,"
+                    " reps=? WHERE id=?", (name, weight, reps, set_id))
+                db.commit()
+                row = db.execute("SELECT * FROM workout_sets WHERE id=?",
+                                 (set_id,)).fetchone()
+            return self._json(200, {"ok": True, "entry": dict(row)})
         if path.startswith("/api/schedules/"):
             uid = self._session_user()
             if not uid:
