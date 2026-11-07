@@ -35,6 +35,16 @@ against the last time you did that day.
 - **History** — every saved workout, newest first, tagged with its
   schedule's name.
 
+## Data access
+
+After authentication, every DB call goes through `UserDB`, a wrapper
+bound to the logged-in user's ID — each method carries the `user_id`
+filter (or, for `workout_sets`, an ownership join) inside it, so
+handlers cannot touch another user's rows. The raw connection is used
+only for startup/migration and the auth bootstrap (user creation,
+session lookup by token). `test_local.py` asserts the HTTP handler
+contains no raw `db.*` calls.
+
 ## Run
 
 Python 3 stdlib only + SQLite. Put a `config.json` next to `server.py`:

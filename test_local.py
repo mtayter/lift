@@ -55,6 +55,16 @@ def call(method, path, body=None, headers=None):
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read())
 
+# ============ part 0: structural guarantee — Handler has no raw DB access ====
+_src = open(os.path.join(ROOT, "server.py")).read()
+_handler_src = _src[_src.index("class Handler"):]
+check("Handler uses no raw db.* calls (UserDB only)",
+      all(tok not in _handler_src for tok in
+          ("db.execute", "db.executemany", "db.executescript", "db.commit")),
+      "")
+check("UserDB wrapper exists and is uid-bound",
+      "class UserDB" in _src and "def __init__(self, uid)" in _src)
+
 # ============ part 1: fresh v2 flow ============
 scratch = "/tmp/lift-test2"
 proc = boot(scratch)
