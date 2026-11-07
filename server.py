@@ -5,20 +5,35 @@ Reuses the Math Quest SSO pattern verbatim (same Google OAuth client,
 same origin https://mtayter.noip.me): GSI popup -> id_token -> verify via
 Google tokeninfo -> own 30-day session cookie (lift_session).
 
-Routes (an optional /lift prefix is stripped, so it works behind the
-Apache /lift/ proxy as well as directly):
-  GET  /                      -> index.html
-  GET  /static/<path>         -> static files
-  GET  /api/config            -> {google_client_id}
-  GET  /api/me                -> user + has_schedule (200 even signed out)
-  POST /api/auth              {id_token}
-  POST /api/logout
-  GET  /api/schedule          -> {schedule|null}            (auth)
-  PUT  /api/schedule          {schedule}                     (auth)
-  GET  /api/workout/today     -> today's day + last-same-day  (auth)
-  POST /api/workouts          {day_index, date, entries, ended_early} (auth)
-  GET  /api/history           -> all workouts, newest first   (auth)
+v2: multiple named schedules per user, each fully independent — its own
+day rotation and its own workout history. Exercises carry stable IDs;
+workout sets link to history by exercise ID + set number, so editing an
+exercise (rename / reorder / regroup / change sets) keeps the link,
+while deleting it (the ID disappears) loses it. Copying a schedule
+regenerates every exercise ID, so a copy starts with no history — by
+design, and the UI warns about exactly that.
+
+Routes (an optional /lift prefix is stripped):
+  GET    /                        -> index.html
+  GET    /static/<path>           -> static files
+  GET    /api/config              -> {google_client_id}
+  GET    /api/me                  -> user + has_schedule (200 even signed out)
+  POST   /api/auth                {id_token}
+  POST   /api/logout
+  GET    /api/schedules           -> [{id,name,created_at,updated_at,days}] newest first (auth)
+  POST   /api/schedules           {name?, schedule?} -> create            (auth)
+  GET    /api/schedules/<id>      -> {id,name,data,linked_exercise_ids}   (auth)
+  PUT    /api/schedules/<id>      {name, schedule} -> update in place     (auth)
+  DELETE /api/schedules/<id>      -> delete (not the last one)            (auth)
+  POST   /api/schedules/<id>/copy -> duplicate with fresh exercise IDs    (auth)
+  GET    /api/workout/today?schedule_id=<id> -> today's day for that
+           schedule (default: newest), rotation + last-same-day scoped
+           to that schedule only                                          (auth)
+  POST   /api/workouts            {schedule_id, day_index, date, entries,
+                                   ended_early}                           (auth)
+  GET    /api/history             -> all workouts, newest first           (auth)
 """
+import copy as _copy
 import hashlib
 import json
 import os
@@ -28,6 +43,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -45,6 +61,11 @@ db_lock = threading.Lock()
 db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.row_factory = sqlite3.Row
 
+
+def _cols(table):
+    return [r[1] for r in db.execute(f"PRAGMA table_info({table})")]
+
+
 with db_lock:
     db.executescript("""
     CREATE TABLE IF NOT EXISTS users(
@@ -53,17 +74,46 @@ with db_lock:
     CREATE TABLE IF NOT EXISTS sessions(
       token_hash TEXT PRIMARY KEY, user_id INTEGER, created_at TEXT,
       expires_at TEXT);
-    CREATE TABLE IF NOT EXISTS schedules(
-      user_id INTEGER PRIMARY KEY, data TEXT, updated_at TEXT);
     CREATE TABLE IF NOT EXISTS workouts(
-      id INTEGER PRIMARY KEY, user_id INTEGER, day_index INTEGER,
+      id INTEGER PRIMARY KEY, user_id INTEGER, schedule_id INTEGER,
+      schedule_name TEXT, day_index INTEGER,
       day_label TEXT, date TEXT, ended_early INTEGER DEFAULT 0,
       schedule_snapshot TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS workout_sets(
       id INTEGER PRIMARY KEY, workout_id INTEGER, seq INTEGER,
-      step_index INTEGER, exercise_name TEXT, set_number INTEGER,
-      group_id TEXT, group_mode TEXT, weight REAL, reps INTEGER);
+      step_index INTEGER, exercise_id TEXT, exercise_name TEXT,
+      set_number INTEGER, group_id TEXT, group_mode TEXT,
+      weight REAL, reps INTEGER);
     """)
+    # Column additions must land before the schedules migration below,
+    # whose UPDATE touches workouts.schedule_id.
+    if "schedule_id" not in _cols("workouts"):
+        db.execute("ALTER TABLE workouts ADD COLUMN schedule_id INTEGER")
+    if "schedule_name" not in _cols("workouts"):
+        db.execute("ALTER TABLE workouts ADD COLUMN schedule_name TEXT")
+    if "exercise_id" not in _cols("workout_sets"):
+        db.execute("ALTER TABLE workout_sets ADD COLUMN exercise_id TEXT")
+    # v1 -> v2 migration: v1 schedules was (user_id PK, data, updated_at)
+    if _cols("schedules") and "id" not in _cols("schedules"):
+        db.execute("ALTER TABLE schedules RENAME TO schedules_v1")
+        db.execute("""
+          CREATE TABLE schedules(
+            id INTEGER PRIMARY KEY, user_id INTEGER, name TEXT,
+            data TEXT, created_at TEXT, updated_at TEXT)""")
+        for row in db.execute("SELECT * FROM schedules_v1").fetchall():
+            cur = db.execute(
+                "INSERT INTO schedules(user_id,name,data,created_at,updated_at)"
+                " VALUES(?,?,?,?,?)",
+                (row["user_id"], "My Schedule", row["data"],
+                 row["updated_at"], row["updated_at"]))
+            db.execute("UPDATE workouts SET schedule_id=? WHERE user_id=?"
+                       " AND schedule_id IS NULL",
+                       (cur.lastrowid, row["user_id"]))
+        db.execute("DROP TABLE schedules_v1")
+    db.execute("""
+      CREATE TABLE IF NOT EXISTS schedules(
+        id INTEGER PRIMARY KEY, user_id INTEGER, name TEXT,
+        data TEXT, created_at TEXT, updated_at TEXT)""")
     db.commit()
 
 TOKENINFO = "https://oauth2.googleapis.com/tokeninfo"
@@ -119,7 +169,8 @@ def day_label(idx):
 def validate_schedule(raw):
     """Return (clean_schedule, error). Enforces the Edit-screen invariants:
     1+ days, 1+ exercises per day, supersets are >=2 contiguous exercises
-    in one day, group mode is 'entire' or 'each'."""
+    in one day, group mode is 'entire' or 'each'. Exercises keep a stable
+    `id` (assigned here if missing) — that ID is the history link."""
     if not isinstance(raw, dict):
         return None, "schedule must be an object"
     try:
@@ -155,8 +206,10 @@ def validate_schedule(raw):
             gid = ex.get("group_id")
             if gid is not None:
                 gid = str(gid)[:40]
-            clean_exs.append({"name": name, "sets": sets, "group_id": gid})
-        # validate groups: >=2 members, contiguous, valid mode
+            ex_id = ex.get("id")
+            ex_id = str(ex_id)[:40] if ex_id else uuid.uuid4().hex[:12]
+            clean_exs.append({"id": ex_id, "name": name, "sets": sets,
+                              "group_id": gid})
         clean_groups = {}
         seen = {}
         for i, ex in enumerate(clean_exs):
@@ -166,7 +219,6 @@ def validate_schedule(raw):
             seen.setdefault(gid, []).append(i)
         for gid, idxs in seen.items():
             if len(idxs) < 2 or idxs != list(range(idxs[0], idxs[0] + len(idxs))):
-                # dissolve invalid groups rather than rejecting the save
                 for i in idxs:
                     clean_exs[i]["group_id"] = None
                 continue
@@ -175,7 +227,6 @@ def validate_schedule(raw):
                 mode = "each"
             clean_groups[gid] = {"mode": mode}
             if mode == "entire":
-                # one shared set count for the whole superset
                 shared = clean_exs[idxs[0]]["sets"]
                 for i in idxs:
                     clean_exs[i]["sets"] = shared
@@ -202,22 +253,78 @@ def counted_sets(day):
     return total
 
 
-def get_schedule(uid):
+def fresh_exercise_ids(data):
+    """Deep-copy schedule data with every exercise ID regenerated —
+    used by Copy so the copy is history-independent."""
+    data = _copy.deepcopy(data)
+    for day in data["days"]:
+        for ex in day["exercises"]:
+            ex["id"] = uuid.uuid4().hex[:12]
+    return data
+
+
+def ensure_exercise_ids(row):
+    """Parse a schedule row's data, backfilling (and persisting) stable
+    exercise IDs for any exercise that lacks one — e.g. v1 schedules.
+    Does not touch updated_at, so 'newest' ordering is unaffected."""
+    data = json.loads(row["data"])
+    changed = False
+    for day in data["days"]:
+        for ex in day["exercises"]:
+            if not ex.get("id"):
+                ex["id"] = uuid.uuid4().hex[:12]
+                changed = True
+    if changed:
+        with db_lock:
+            db.execute("UPDATE schedules SET data=? WHERE id=?",
+                       (json.dumps(data), row["id"]))
+            db.commit()
+    return data
+
+
+def get_schedule_row(uid, sid):
     with db_lock:
-        row = db.execute("SELECT data FROM schedules WHERE user_id=?",
+        return db.execute("SELECT * FROM schedules WHERE user_id=? AND id=?",
+                          (uid, sid)).fetchone()
+
+
+def list_schedules(uid):
+    with db_lock:
+        rows = db.execute(
+            "SELECT * FROM schedules WHERE user_id=? ORDER BY updated_at DESC,"
+            " id DESC", (uid,)).fetchall()
+    return [{"id": r["id"], "name": r["name"], "created_at": r["created_at"],
+             "updated_at": r["updated_at"],
+             "days": len(json.loads(r["data"])["days"])} for r in rows]
+
+
+def has_any_schedule(uid):
+    with db_lock:
+        row = db.execute("SELECT COUNT(*) c FROM schedules WHERE user_id=?",
                          (uid,)).fetchone()
-    return json.loads(row["data"]) if row else None
+    return row["c"] > 0
+
+
+def linked_exercise_ids(uid, sid):
+    with db_lock:
+        rows = db.execute(
+            "SELECT DISTINCT ws.exercise_id FROM workout_sets ws"
+            " JOIN workouts w ON w.id = ws.workout_id"
+            " WHERE w.user_id=? AND w.schedule_id=? AND ws.exercise_id IS NOT NULL",
+            (uid, sid)).fetchall()
+    return [r["exercise_id"] for r in rows]
 
 
 def workout_to_json(w):
     with db_lock:
         sets = db.execute(
-            "SELECT seq, step_index, exercise_name, set_number, group_id,"
-            " group_mode, weight, reps FROM workout_sets WHERE workout_id=?"
-            " ORDER BY seq", (w["id"],)).fetchall()
-    return {"id": w["id"], "day_index": w["day_index"],
-            "day_label": w["day_label"], "date": w["date"],
-            "ended_early": bool(w["ended_early"]),
+            "SELECT seq, step_index, exercise_id, exercise_name, set_number,"
+            " group_id, group_mode, weight, reps FROM workout_sets"
+            " WHERE workout_id=? ORDER BY seq", (w["id"],)).fetchall()
+    return {"id": w["id"], "schedule_id": w["schedule_id"],
+            "schedule_name": w["schedule_name"],
+            "day_index": w["day_index"], "day_label": w["day_label"],
+            "date": w["date"], "ended_early": bool(w["ended_early"]),
             "entries": [dict(s) for s in sets]}
 
 
@@ -298,7 +405,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- GET ----
     def do_GET(self):
-        path = self._strip_prefix(urllib.parse.urlparse(self.path).path)
+        parsed = urllib.parse.urlparse(self.path)
+        path = self._strip_prefix(parsed.path)
+        qs = urllib.parse.parse_qs(parsed.query)
         if path in ("/", ""):
             return self._serve_file("index.html")
         if path.startswith("/static/"):
@@ -315,36 +424,62 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "signed_in": True,
                 "user": {"name": u["name"], "email": u["email"],
                          "picture": u["picture"]},
-                "has_schedule": get_schedule(uid) is not None})
+                "has_schedule": has_any_schedule(uid)})
         uid = self._session_user()
-        if path == "/api/schedule":
+        if path == "/api/schedules":
             if not uid:
                 return self._json(401, {"ok": False})
             return self._json(200, {"ok": True,
-                                    "schedule": get_schedule(uid)})
+                                    "schedules": list_schedules(uid)})
+        if path.startswith("/api/schedules/"):
+            if not uid:
+                return self._json(401, {"ok": False})
+            try:
+                sid = int(path.split("/")[3])
+            except (IndexError, ValueError):
+                return self._json(404, {"ok": False})
+            row = get_schedule_row(uid, sid)
+            if not row:
+                return self._json(404, {"ok": False})
+            return self._json(200, {
+                "ok": True, "id": row["id"], "name": row["name"],
+                "schedule": ensure_exercise_ids(row),
+                "linked_exercise_ids": linked_exercise_ids(uid, sid)})
         if path == "/api/workout/today":
             if not uid:
                 return self._json(401, {"ok": False})
-            sched = get_schedule(uid)
-            if not sched:
-                return self._json(200, {"ok": True, "has_schedule": False})
+            schedules = list_schedules(uid)
+            if not schedules:
+                return self._json(200, {"ok": True, "has_schedule": False,
+                                        "schedules": []})
+            sid = None
+            if qs.get("schedule_id"):
+                try:
+                    sid = int(qs["schedule_id"][0])
+                except ValueError:
+                    sid = None
+            row = get_schedule_row(uid, sid) if sid else None
+            if row is None:
+                row = get_schedule_row(uid, schedules[0]["id"])  # newest
+            sched = ensure_exercise_ids(row)
             ndays = len(sched["days"])
             with db_lock:
                 last_any = db.execute(
-                    "SELECT * FROM workouts WHERE user_id=? ORDER BY id DESC"
-                    " LIMIT 1", (uid,)).fetchone()
+                    "SELECT * FROM workouts WHERE user_id=? AND schedule_id=?"
+                    " ORDER BY id DESC LIMIT 1", (uid, row["id"])).fetchone()
                 if last_any:
                     day_idx = (last_any["day_index"] + 1) % ndays
                     last_same = db.execute(
                         "SELECT * FROM workouts WHERE user_id=? AND"
-                        " day_index=? ORDER BY id DESC LIMIT 1",
-                        (uid, day_idx)).fetchone()
+                        " schedule_id=? AND day_index=? ORDER BY id DESC"
+                        " LIMIT 1", (uid, row["id"], day_idx)).fetchone()
                 else:
                     day_idx, last_same = 0, None
             day = sched["days"][day_idx]
             return self._json(200, {
-                "ok": True, "has_schedule": True, "day_index": day_idx,
-                "day_label": day_label(day_idx),
+                "ok": True, "has_schedule": True, "schedules": schedules,
+                "schedule_id": row["id"], "schedule_name": row["name"],
+                "day_index": day_idx, "day_label": day_label(day_idx),
                 "rest_minutes": sched["rest_minutes"], "day": day,
                 "counted_sets": counted_sets(day),
                 "last_same_day": (workout_to_json(last_same)
@@ -361,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
                                                  for w in rows]})
         return self._json(404, {"ok": False, "error": "not found"})
 
-    # ---- POST / PUT ----
+    # ---- POST / PUT / DELETE ----
     def do_POST(self):
         path = self._strip_prefix(urllib.parse.urlparse(self.path).path)
         if path == "/api/auth":
@@ -387,7 +522,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "user": {"name": u["name"], "email": u["email"],
                          "picture": u["picture"]},
-                "has_schedule": get_schedule(uid) is not None},
+                "has_schedule": has_any_schedule(uid)},
                 cookies=[cookie])
         if path == "/api/logout":
             token = self._session_token()
@@ -400,15 +535,66 @@ class Handler(BaseHTTPRequestHandler):
                 "lift_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax;"
                 " Secure"])
         uid = self._session_user()
+        if path == "/api/schedules":
+            if not uid:
+                return self._json(401, {"ok": False})
+            p = self._json_body()
+            if p is None:
+                return self._json(400, {"ok": False})
+            raw = p.get("schedule") or {
+                "rest_minutes": 2,
+                "days": [{"exercises": [{"name": "", "sets": 1,
+                                         "group_id": None}], "groups": {}}]}
+            clean, err = validate_schedule(raw)
+            if err:
+                return self._json(400, {"ok": False, "error": err})
+            name = str(p.get("name") or "My Schedule")[:80]
+            now = datetime.utcnow().isoformat()
+            with db_lock:
+                cur = db.execute(
+                    "INSERT INTO schedules(user_id,name,data,created_at,"
+                    "updated_at) VALUES(?,?,?,?,?)",
+                    (uid, name, json.dumps(clean), now, now))
+                db.commit()
+            return self._json(200, {"ok": True, "id": cur.lastrowid,
+                                    "name": name, "schedule": clean})
+        if path.startswith("/api/schedules/") and path.endswith("/copy"):
+            if not uid:
+                return self._json(401, {"ok": False})
+            try:
+                sid = int(path.split("/")[3])
+            except (IndexError, ValueError):
+                return self._json(404, {"ok": False})
+            row = get_schedule_row(uid, sid)
+            if not row:
+                return self._json(404, {"ok": False})
+            data = fresh_exercise_ids(json.loads(row["data"]))
+            name = (row["name"] + " (copy)")[:80]
+            now = datetime.utcnow().isoformat()
+            with db_lock:
+                cur = db.execute(
+                    "INSERT INTO schedules(user_id,name,data,created_at,"
+                    "updated_at) VALUES(?,?,?,?,?)",
+                    (uid, name, json.dumps(data), now, now))
+                db.commit()
+            return self._json(200, {"ok": True, "id": cur.lastrowid,
+                                    "name": name, "schedule": data})
         if path == "/api/workouts":
             if not uid:
                 return self._json(401, {"ok": False})
             p = self._json_body()
             if p is None:
                 return self._json(400, {"ok": False})
-            sched = get_schedule(uid)
-            if not sched:
-                return self._json(400, {"ok": False, "error": "no schedule"})
+            try:
+                sid = int(p.get("schedule_id"))
+            except (TypeError, ValueError):
+                return self._json(400, {"ok": False,
+                                        "error": "schedule_id required"})
+            row = get_schedule_row(uid, sid)
+            if not row:
+                return self._json(404, {"ok": False,
+                                        "error": "schedule not found"})
+            sched = json.loads(row["data"])
             try:
                 day_idx = int(p.get("day_index", 0))
             except (TypeError, ValueError):
@@ -436,6 +622,8 @@ class Handler(BaseHTTPRequestHandler):
                 clean.append({
                     "seq": i,
                     "step_index": num(e.get("step_index"), int) or 0,
+                    "exercise_id": (str(e["exercise_id"])[:40]
+                                    if e.get("exercise_id") else None),
                     "exercise_name": str(e.get("exercise_name", ""))[:100],
                     "set_number": num(e.get("set_number"), int) or 0,
                     "group_id": (str(e["group_id"])[:40]
@@ -447,45 +635,78 @@ class Handler(BaseHTTPRequestHandler):
                     "reps": num(e.get("reps"), int)})
             with db_lock:
                 cur = db.execute(
-                    "INSERT INTO workouts(user_id,day_index,day_label,date,"
-                    "ended_early,schedule_snapshot,created_at)"
-                    " VALUES(?,?,?,?,?,?,?)",
-                    (uid, day_idx, day_label(day_idx), date_str,
-                     1 if p.get("ended_early") else 0,
+                    "INSERT INTO workouts(user_id,schedule_id,schedule_name,"
+                    "day_index,day_label,date,ended_early,schedule_snapshot,"
+                    "created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (uid, sid, row["name"], day_idx, day_label(day_idx),
+                     date_str, 1 if p.get("ended_early") else 0,
                      json.dumps(sched["days"][day_idx]),
                      datetime.utcnow().isoformat()))
                 wid = cur.lastrowid
                 db.executemany(
                     "INSERT INTO workout_sets(workout_id,seq,step_index,"
-                    "exercise_name,set_number,group_id,group_mode,weight,"
-                    "reps) VALUES(?,?,?,?,?,?,?,?,?)",
-                    [(wid, e["seq"], e["step_index"], e["exercise_name"],
-                      e["set_number"], e["group_id"], e["group_mode"],
-                      e["weight"], e["reps"]) for e in clean])
+                    "exercise_id,exercise_name,set_number,group_id,"
+                    "group_mode,weight,reps) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    [(wid, e["seq"], e["step_index"], e["exercise_id"],
+                      e["exercise_name"], e["set_number"], e["group_id"],
+                      e["group_mode"], e["weight"], e["reps"])
+                     for e in clean])
                 db.commit()
             return self._json(200, {"ok": True, "workout_id": wid})
         return self._json(404, {"ok": False})
 
     def do_PUT(self):
         path = self._strip_prefix(urllib.parse.urlparse(self.path).path)
-        if path == "/api/schedule":
+        if path.startswith("/api/schedules/"):
             uid = self._session_user()
             if not uid:
                 return self._json(401, {"ok": False})
+            try:
+                sid = int(path.split("/")[3])
+            except (IndexError, ValueError):
+                return self._json(404, {"ok": False})
+            if not get_schedule_row(uid, sid):
+                return self._json(404, {"ok": False})
             p = self._json_body()
             if p is None:
                 return self._json(400, {"ok": False})
             clean, err = validate_schedule(p.get("schedule"))
             if err:
                 return self._json(400, {"ok": False, "error": err})
+            name = str(p.get("name") or "My Schedule")[:80]
             with db_lock:
                 db.execute(
-                    "INSERT INTO schedules(user_id,data,updated_at)"
-                    " VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET"
-                    " data=excluded.data, updated_at=excluded.updated_at",
-                    (uid, json.dumps(clean), datetime.utcnow().isoformat()))
+                    "UPDATE schedules SET name=?, data=?, updated_at=?"
+                    " WHERE user_id=? AND id=?",
+                    (name, json.dumps(clean), datetime.utcnow().isoformat(),
+                     uid, sid))
                 db.commit()
-            return self._json(200, {"ok": True, "schedule": clean})
+            return self._json(200, {"ok": True, "id": sid, "name": name,
+                                    "schedule": clean,
+                                    "linked_exercise_ids":
+                                        linked_exercise_ids(uid, sid)})
+        return self._json(404, {"ok": False})
+
+    def do_DELETE(self):
+        path = self._strip_prefix(urllib.parse.urlparse(self.path).path)
+        if path.startswith("/api/schedules/"):
+            uid = self._session_user()
+            if not uid:
+                return self._json(401, {"ok": False})
+            try:
+                sid = int(path.split("/")[3])
+            except (IndexError, ValueError):
+                return self._json(404, {"ok": False})
+            if not get_schedule_row(uid, sid):
+                return self._json(404, {"ok": False})
+            if len(list_schedules(uid)) <= 1:
+                return self._json(400, {"ok": False, "error":
+                                        "can't delete the only schedule"})
+            with db_lock:
+                db.execute("DELETE FROM schedules WHERE user_id=? AND id=?",
+                           (uid, sid))
+                db.commit()
+            return self._json(200, {"ok": True})
         return self._json(404, {"ok": False})
 
 

@@ -87,6 +87,23 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .empty-note{background:var(--panel);border:1px solid var(--line);
   border-radius:var(--radius);padding:18px;text-align:center;color:var(--muted)}
 
+/* schedule pickers + bar */
+.sched-picker-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.sched-picker-row label{font-weight:700;color:var(--muted)}
+select{background:#0f1114;color:var(--text);border:1px solid var(--line);
+  border-radius:7px;padding:10px;font-size:1rem;min-height:44px;flex:1;min-width:0}
+.sched-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.sched-bar select{flex:1 1 160px}
+.sched-bar-btns{display:flex;gap:6px}
+.sched-bar-btns .btn{padding:8px 13px;min-height:44px}
+#schedule-name{flex:1 1 100%;background:#0f1114;color:var(--text);
+  border:1px solid var(--line);border-radius:7px;padding:10px;font-size:1rem;
+  min-height:44px}
+.link-warning{background:rgba(255,170,0,.13);border:1px solid #8a6d1f;
+  color:#ffd97a;border-radius:var(--radius);padding:10px 12px;margin-bottom:10px;
+  font-size:.92rem}
+.link-badge{font-size:.8rem}
+
 /* edit */
 .edit-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .rest-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
@@ -144,6 +161,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .hist-date{color:var(--muted)}
 .badge{background:#5a2626;color:#ff9a9a;border-radius:4px;font-size:.7rem;
   font-weight:800;padding:2px 6px;letter-spacing:.04em}
+.badge.sched{background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
 .hist-sets{margin-top:8px;font-family:var(--mono);font-size:.9rem}
 .hist-sets .hrow{display:flex;gap:10px;padding:3px 0;border-bottom:1px solid #24262d}
 .hist-sets .hrow:last-child{border-bottom:none}

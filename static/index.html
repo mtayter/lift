@@ -39,6 +39,10 @@
 
   <!-- ===== WORKOUT ===== -->
   <section class="view" id="view-workout">
+    <div class="sched-picker-row">
+      <label for="wo-schedule-picker">Schedule</label>
+      <select id="wo-schedule-picker"></select>
+    </div>
     <div id="workout-controls">
       <div class="wc-left">
         <div id="workout-day-label">Day –</div>
@@ -56,6 +60,16 @@
 
   <!-- ===== EDIT ===== -->
   <section class="view" id="view-edit" style="display:none">
+    <div class="sched-bar">
+      <select id="edit-schedule-picker" aria-label="Schedule to edit"></select>
+      <div class="sched-bar-btns">
+        <button class="btn" id="btn-new-schedule">New</button>
+        <button class="btn" id="btn-copy-schedule">Copy</button>
+        <button class="btn danger" id="btn-delete-schedule">Delete</button>
+      </div>
+      <input id="schedule-name" type="text" placeholder="Schedule name" autocomplete="off" aria-label="Schedule name">
+    </div>
+    <div id="link-warning" class="link-warning" style="display:none"></div>
     <div class="edit-head">
       <h2>Your Split</h2>
       <button class="btn primary" id="btn-save-schedule">Save Schedule</button>

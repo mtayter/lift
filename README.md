@@ -12,12 +12,28 @@ against the last time you did that day.
   1 set means for it: *entire superset* (one timer step and one counted
   set per round) or *each exercise* (interleaved, a timer step and a
   counted set per exercise). Per-day total = rest minutes × counted sets.
-- **Workout** — today's day is picked by rotating from your last saved
-  workout. The timer auto-advances the highlight one set per rest period,
-  beeping 3 times at zero. Left column = last time you did this day;
-  right column = today's weight/reps (last time's values as placeholders).
-  End Early saves what's done and still advances the rotation.
-- **History** — every saved workout, newest first.
+- **Multiple schedules** — each user can keep several named schedules.
+  They are fully *independent*: separate day rotation, separate history.
+  Edit updates a schedule in place; Copy duplicates it with fresh
+  exercise IDs, so a copy starts with no history (the UI warns about
+  this and suggests Edit instead when history matters). New makes a
+  blank schedule; Delete removes one (never the last one; saved
+  workouts stay in History).
+- **History links** — every exercise has a stable ID, and workout sets
+  record it. Last-time matching is by exercise ID + set number, so
+  editing an exercise (rename / reorder / regroup / change sets) keeps
+  its link; deleting the exercise loses it. Linked exercises show a 🔗
+  badge in Edit; deleting one asks first, and editing one shows a
+  warning banner explaining the rules.
+- **Workout** — pick a schedule (defaults to the newest); today's day
+  is picked by rotating from your last saved workout *on that
+  schedule*. The timer auto-advances the highlight one set per rest
+  period, beeping 3 times at zero. Left column = last time you did
+  this day on this schedule; right column = today's weight/reps (last
+  time's values as placeholders). End Early saves what's done and
+  still advances the rotation.
+- **History** — every saved workout, newest first, tagged with its
+  schedule's name.
 
 ## Run
 

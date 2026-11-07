@@ -1,11 +1,18 @@
 'use strict';
-/* Lift Log SPA */
+/* Lift Log SPA — v2: multiple independent schedules, exercise-ID history links */
 const $ = id => document.getElementById(id);
 const API = '/lift/api';
 let user = null, hasSchedule = false;
-let schedule = null;          // editable copy in Edit view
-let editDirty = false;
 let currentView = 'workout';
+
+/* edit state */
+let schedulesMeta = [];        // [{id,name,created_at,updated_at,days}] newest first
+let currentScheduleId = null;
+let schedule = null;           // editable data {rest_minutes, days}
+let scheduleName = '';
+let linkedIds = new Set();     // exercise IDs with history in current schedule
+let linkedEdited = false;      // a linked exercise was name/sets-edited
+let editDirty = false;
 
 /* ---------- helpers ---------- */
 function toast(msg) {
@@ -32,14 +39,17 @@ function fmtClock(sec) {
   return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
 }
 function dayLabel(i) { return i < 26 ? String.fromCharCode(65 + i) : '#' + (i + 1); }
-function uid() { return 'x' + Math.random().toString(36).slice(2, 10); }
+function uid() { return 'x' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 async function api(path, opts) {
   const r = await fetch(API + path, opts);
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }
+function jsonOpts(method, obj) {
+  return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) };
+}
 
 /* ---------- superset / step logic (shared by Edit totals + Workout) ---------- */
-// Group members: contiguous exercises with the same non-null group_id.
 function groupRuns(day) {
   const runs = []; let cur = null;
   day.exercises.forEach((ex, i) => {
@@ -56,31 +66,29 @@ function groupOf(day, idx) {
   const run = groupRuns(day).find(r => r.gid === gid);
   return run ? { gid, run, mode: groupMode(day, gid) } : null;
 }
-// Build timer steps. Each step is one counted "set": {entries:[{name,set_number,group_id,group_mode}]}
-// mode 'entire': one step holds every exercise in the round.
-// mode 'each':   interleaved, one step per exercise occurrence.
+// Each step is one counted "set": {entries:[{name, ex_id, set_number, group_id, group_mode}]}
 function buildSteps(day) {
   const steps = []; let i = 0;
+  const entry = (ex, s, mode) => ({ name: ex.name, ex_id: ex.id, set_number: s, group_id: ex.group_id && mode ? ex.group_id : null, group_mode: mode || null });
   while (i < day.exercises.length) {
     const ex = day.exercises[i];
     const g = groupOf(day, i);
     if (!g) {
       for (let s = 1; s <= ex.sets; s++)
-        steps.push({ entries: [{ name: ex.name, set_number: s, group_id: null, group_mode: null }] });
+        steps.push({ entries: [entry(ex, s, null)] });
       i++;
     } else if (g.mode === 'each') {
       const members = g.run.idxs.map(j => day.exercises[j]);
       const rounds = Math.max(...members.map(m => m.sets));
       for (let r = 0; r < rounds; r++)
         for (const m of members)
-          if (r < m.sets)
-            steps.push({ entries: [{ name: m.name, set_number: r + 1, group_id: g.gid, group_mode: 'each' }] });
+          if (r < m.sets) steps.push({ entries: [entry(m, r + 1, 'each')] });
       i = g.run.idxs[g.run.idxs.length - 1] + 1;
     } else { // entire
       const members = g.run.idxs.map(j => day.exercises[j]);
       const rounds = members[0].sets;
       for (let r = 0; r < rounds; r++)
-        steps.push({ entries: members.map(m => ({ name: m.name, set_number: r + 1, group_id: g.gid, group_mode: 'entire' })) });
+        steps.push({ entries: members.map(m => entry(m, r + 1, 'entire')) });
       i = g.run.idxs[g.run.idxs.length - 1] + 1;
     }
   }
@@ -100,7 +108,7 @@ async function initAuth() {
     google.accounts.id.initialize({
       client_id: cfg.body.google_client_id,
       callback: async resp => {
-        const r = await api('/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id_token: resp.credential }) });
+        const r = await api('/auth', jsonOpts('POST', { id_token: resp.credential }));
         if (r.body.ok) enterApp(r.body);
         else $('signin-error').textContent = 'Sign-in failed. Please try again.';
       }
@@ -130,7 +138,6 @@ function updateNav() {
   $('nav-workout').classList.toggle('disabled', !hasSchedule);
 }
 async function showView(v) {
-  if (v === currentView && v !== 'workout') { /* re-render anyway below for edit/history */ }
   if (v !== currentView) {
     if (wo.running) {
       if (!confirm('A workout timer is running. Leave and discard this workout?')) return;
@@ -153,20 +160,113 @@ $('nav-edit').onclick = () => showView('edit');
 $('nav-history').onclick = () => showView('history');
 $('nav-logout').onclick = logout;
 
-/* ---------- EDIT ---------- */
+/* ---------- EDIT: schedule management ---------- */
 function defaultSchedule() {
-  return { rest_minutes: 2, days: [{ exercises: [{ name: '', sets: 1, group_id: null }], groups: {} }] };
+  return { rest_minutes: 2, days: [{ exercises: [{ id: uid(), name: '', sets: 1, group_id: null }], groups: {} }] };
+}
+async function refreshScheduleList() {
+  const r = await api('/schedules');
+  schedulesMeta = r.body.schedules || [];
+  return schedulesMeta;
+}
+function fillPicker(sel, items, selectedId) {
+  sel.innerHTML = '';
+  for (const s of items) {
+    const o = document.createElement('option');
+    o.value = s.id; o.textContent = s.name;
+    if (s.id === selectedId) o.selected = true;
+    sel.appendChild(o);
+  }
 }
 async function loadEdit() {
-  if (!schedule) {
-    const r = await api('/schedule');
-    schedule = r.body.schedule || defaultSchedule();
+  await refreshScheduleList();
+  if (!schedulesMeta.length) {
+    const r = await api('/schedules', jsonOpts('POST', { name: 'My Schedule', schedule: defaultSchedule() }));
+    if (r.body.ok) { await refreshScheduleList(); }
   }
+  if (!schedulesMeta.length) return;
+  const target = schedulesMeta.some(s => s.id === currentScheduleId)
+    ? currentScheduleId : schedulesMeta[0].id;
+  await loadScheduleIntoEditor(target);
+}
+async function loadScheduleIntoEditor(id) {
+  const r = await api('/schedules/' + id);
+  if (!r.body.ok) return;
+  currentScheduleId = r.body.id;
+  scheduleName = r.body.name;
+  schedule = r.body.schedule;
+  linkedIds = new Set(r.body.linked_exercise_ids || []);
+  linkedEdited = false; editDirty = false;
+  fillPicker($('edit-schedule-picker'), schedulesMeta, currentScheduleId);
+  $('schedule-name').value = scheduleName;
+  $('btn-delete-schedule').disabled = schedulesMeta.length <= 1;
   renderEdit();
 }
-function markDirty() { editDirty = true; $('save-msg').textContent = ''; $('save-msg').className = ''; }
+$('edit-schedule-picker').onchange = async e => {
+  const id = Number(e.target.value);
+  if (id === currentScheduleId) return;
+  if (editDirty && !confirm('You have unsaved changes to this schedule. Discard them and switch?')) {
+    e.target.value = currentScheduleId; return;
+  }
+  editDirty = false;
+  await loadScheduleIntoEditor(id);
+};
+$('schedule-name').oninput = () => { scheduleName = $('schedule-name').value; markDirty(); };
+$('btn-new-schedule').onclick = async () => {
+  if (editDirty && !confirm('You have unsaved changes. Discard them and start a new schedule?')) return;
+  const r = await api('/schedules', jsonOpts('POST', { name: 'Schedule ' + (schedulesMeta.length + 1), schedule: defaultSchedule() }));
+  if (r.body.ok) {
+    hasSchedule = true; updateNav();
+    await refreshScheduleList();
+    editDirty = false;
+    await loadScheduleIntoEditor(r.body.id);
+    toast('New schedule created');
+  }
+};
+$('btn-copy-schedule').onclick = async () => {
+  if (editDirty) { toast('Save this schedule first, then copy it'); return; }
+  const ok = confirm(
+    'Copy "' + scheduleName + '"?\n\n' +
+    'The copy is INDEPENDENT: it starts with no workout history — ' +
+    'last-time weights/reps will not carry over, and its day rotation starts fresh.\n\n' +
+    'If you want to preserve the history, use Edit on this schedule instead of copying it.');
+  if (!ok) return;
+  const r = await api('/schedules/' + currentScheduleId + '/copy', { method: 'POST' });
+  if (r.body.ok) {
+    await refreshScheduleList();
+    await loadScheduleIntoEditor(r.body.id);
+    toast('Copied — this copy has no history yet');
+  } else toast('Copy failed');
+};
+$('btn-delete-schedule').onclick = async () => {
+  if (schedulesMeta.length <= 1) return;
+  const ok = confirm(
+    'Delete "' + scheduleName + '"?\n\n' +
+    'Its rotation and last-time links go away. Workouts already saved in History are kept.');
+  if (!ok) return;
+  const r = await api('/schedules/' + currentScheduleId, { method: 'DELETE' });
+  if (r.body.ok) {
+    currentScheduleId = null; editDirty = false;
+    await refreshScheduleList();
+    if (schedulesMeta.length) await loadScheduleIntoEditor(schedulesMeta[0].id);
+    toast('Schedule deleted');
+  } else toast(r.body.error || 'Delete failed');
+};
 
+/* ---------- EDIT: split editor ---------- */
+function markDirty() { editDirty = true; $('save-msg').textContent = ''; $('save-msg').className = ''; }
+function flagLinkedEdit() {
+  if (linkedEdited) return;
+  linkedEdited = true;
+  const w = $('link-warning');
+  w.textContent = '🔗 You are editing an exercise with linked workout history. ' +
+    'Edits keep the link — the history follows the exercise through renames, reorders and set changes. ' +
+    'Deleting a linked exercise loses its link.';
+  w.style.display = 'block';
+}
 function renderEdit() {
+  if (!schedule) return;
+  $('link-warning').style.display = linkedEdited ? 'block' : 'none';
   $('rest-input').value = schedule.rest_minutes;
   const c = $('days-container'); c.innerHTML = '';
   schedule.days.forEach((day, di) => {
@@ -185,12 +285,13 @@ function renderEdit() {
       <button class="btn add-ex" data-act="ex-add">+ Add Exercise</button>`;
     const list = card.querySelector('.ex-list');
     day.exercises.forEach((ex, ei) => {
+      if (!ex.id) ex.id = uid();
       const g = groupOf(day, ei);
       if (g && g.run.idxs[0] === ei) list.appendChild(groupHeadEl(day, g));
       list.appendChild(exRowEl(day, ex, ei, g));
       if (ei < day.exercises.length - 1) list.appendChild(linkRowEl(day, ei));
     });
-    card.querySelectorAll('[data-act]').forEach(b => b.onclick = () => editAction(b.dataset.act, di, card));
+    card.querySelectorAll('[data-act]').forEach(b => b.onclick = () => editAction(b.dataset.act, di));
     c.appendChild(card);
   });
   refreshDayTotals();
@@ -218,24 +319,32 @@ function exRowEl(day, ex, ei, g) {
   row.className = 'ex-row' + (g ? ' in-group' : '');
   const isFirstOfGroup = g && g.run.idxs[0] === ei;
   const sharedCell = g && g.mode === 'entire' && !isFirstOfGroup;
+  const linked = linkedIds.has(ex.id);
   row.innerHTML = `
     <button class="iconbtn" data-x="up" ${ei === 0 ? 'disabled' : ''} title="Move up">↑</button>
     <button class="iconbtn" data-x="down" ${ei === day.exercises.length - 1 ? 'disabled' : ''} title="Move down">↓</button>
-    <input type="text" placeholder="Exercise name" value="${ex.name.replace(/"/g, '&quot;')}" autocomplete="off">
+    <span style="display:flex;align-items:center;gap:4px;min-width:0">
+      <input type="text" placeholder="Exercise name" value="${esc(ex.name)}" autocomplete="off" style="flex:1">
+      ${linked ? '<span class="link-badge" title="Has linked workout history">🔗</span>' : ''}
+    </span>
     ${sharedCell ? '<span class="shared">shared</span>' :
       `<input type="number" min="1" max="20" step="1" value="${ex.sets}" inputmode="numeric" title="Sets">`}
     <button class="iconbtn" data-x="del" ${day.exercises.length <= 1 ? 'disabled' : ''} title="Remove exercise">🗑</button>`;
   const [nameIn, setsIn] = [row.querySelector('input[type=text]'), row.querySelector('input[type=number]')];
-  nameIn.oninput = () => { ex.name = nameIn.value; markDirty(); };
+  nameIn.oninput = () => { ex.name = nameIn.value; if (linked) flagLinkedEdit(); markDirty(); };
   if (setsIn) setsIn.oninput = () => {
     let v = parseInt(setsIn.value, 10); if (!(v >= 1)) v = 1; if (v > 20) v = 20;
     if (g && g.mode === 'entire') g.run.idxs.forEach(j => day.exercises[j].sets = v);
     else ex.sets = v;
+    if (linked) flagLinkedEdit();
     markDirty(); refreshDayTotals();
   };
   row.querySelector('[data-x=up]').onclick = () => moveExercise(day, ei, -1);
   row.querySelector('[data-x=down]').onclick = () => moveExercise(day, ei, 1);
   row.querySelector('[data-x=del]').onclick = () => {
+    if (linked && !confirm(
+      `Delete "${ex.name || 'this exercise'}"?\n\nIt has linked workout history — deleting it loses the history link, ` +
+      'so its last-time weights/reps will no longer appear. (The saved workouts in History stay.)')) return;
     const gid = ex.group_id;
     day.exercises.splice(ei, 1);
     dissolveSmallGroups(day, gid ? [gid] : []);
@@ -285,22 +394,26 @@ function splitGroupAt(day, ei) {
 function moveExercise(day, ei, dir) {
   const j = ei + dir; if (j < 0 || j >= day.exercises.length) return;
   const a = day.exercises[ei], b = day.exercises[j];
-  // Swapping across a superset boundary takes the moved exercise out of its
-  // group, so groups always stay contiguous.
   if (a.group_id && a.group_id !== b.group_id) { const g = a.group_id; a.group_id = null; dissolveSmallGroups(day, [g]); }
   else if (b.group_id && a.group_id !== b.group_id) { const g = b.group_id; b.group_id = null; dissolveSmallGroups(day, [g]); }
   day.exercises[j] = a; day.exercises[ei] = b;
   markDirty(); renderEdit();
 }
-function editAction(act, di, card) {
+function editAction(act, di) {
   const day = schedule.days[di];
   if (act === 'day-up' && di > 0) { [schedule.days[di - 1], schedule.days[di]] = [schedule.days[di], schedule.days[di - 1]]; markDirty(); renderEdit(); }
   if (act === 'day-down' && di < schedule.days.length - 1) { [schedule.days[di + 1], schedule.days[di]] = [schedule.days[di], schedule.days[di + 1]]; markDirty(); renderEdit(); }
-  if (act === 'day-del') { schedule.days.splice(di, 1); markDirty(); renderEdit(); }
-  if (act === 'ex-add') { day.exercises.push({ name: '', sets: 1, group_id: null }); markDirty(); renderEdit(); }
+  if (act === 'day-del') {
+    const linkedHere = day.exercises.filter(e => linkedIds.has(e.id));
+    if (linkedHere.length && !confirm(
+      `Remove Day ${dayLabel(di)}?\n\nIt has ${linkedHere.length} exercise(s) with linked workout history — ` +
+      'removing the day deletes those exercises and loses their history links.')) return;
+    schedule.days.splice(di, 1); markDirty(); renderEdit();
+  }
+  if (act === 'ex-add') { day.exercises.push({ id: uid(), name: '', sets: 1, group_id: null }); markDirty(); renderEdit(); }
 }
 $('btn-add-day').onclick = () => {
-  schedule.days.push({ exercises: [{ name: '', sets: 1, group_id: null }], groups: {} });
+  schedule.days.push({ exercises: [{ id: uid(), name: '', sets: 1, group_id: null }], groups: {} });
   markDirty(); renderEdit();
 };
 $('rest-input').oninput = () => {
@@ -309,6 +422,7 @@ $('rest-input').oninput = () => {
   markDirty(); refreshDayTotals();
 };
 function refreshDayTotals() {
+  if (!schedule) return;
   schedule.days.forEach((day, di) => {
     const el = $('day-total-' + di); if (!el) return;
     const total = countedSets(day);
@@ -319,10 +433,17 @@ $('btn-save-schedule').onclick = async () => {
   const v = parseFloat($('rest-input').value);
   if (!(v > 0 && v <= 60)) { $('save-msg').textContent = 'Time between sets must be between 0 and 60 minutes.'; $('save-msg').className = 'err'; return; }
   schedule.rest_minutes = v;
-  const r = await api('/schedule', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ schedule }) });
+  scheduleName = $('schedule-name').value.trim() || 'My Schedule';
+  const r = await api('/schedules/' + currentScheduleId, jsonOpts('PUT', { name: scheduleName, schedule }));
   if (r.body.ok) {
-    schedule = r.body.schedule; editDirty = false; hasSchedule = true; updateNav();
+    schedule = r.body.schedule;
+    linkedIds = new Set(r.body.linked_exercise_ids || []);
+    editDirty = false; linkedEdited = false;
+    hasSchedule = true; updateNav();
+    await refreshScheduleList();
+    fillPicker($('edit-schedule-picker'), schedulesMeta, currentScheduleId);
     $('save-msg').textContent = 'Saved ✓'; $('save-msg').className = 'ok';
+    renderEdit();
     toast('Schedule saved');
   } else {
     $('save-msg').textContent = 'Save failed: ' + (r.body.error || 'unknown error');
@@ -332,15 +453,18 @@ $('btn-save-schedule').onclick = async () => {
 
 /* ---------- WORKOUT ---------- */
 function freshWorkoutState() {
-  return { running: false, steps: [], flat: [], current: 0, deadline: 0, timerId: null, restSec: 120, data: null, wakeLock: null };
+  return { running: false, steps: [], flat: [], current: 0, deadline: 0, timerId: null, restSec: 120, data: null, wakeLock: null, lastMap: new Map() };
 }
 let wo = freshWorkoutState();
 
-async function loadWorkout() {
+async function loadWorkout(preferredId) {
   stopTimer();
   wo = freshWorkoutState();
-  const r = await api('/workout/today');
+  const q = preferredId ? '?schedule_id=' + preferredId : '';
+  const r = await api('/workout/today' + q);
   const body = $('workout-body');
+  schedulesMeta = r.body.schedules || schedulesMeta;
+  fillPicker($('wo-schedule-picker'), schedulesMeta, r.body.schedule_id);
   if (!r.body.has_schedule) {
     $('workout-day-label').textContent = 'No schedule yet';
     $('workout-sub').textContent = '';
@@ -350,21 +474,34 @@ async function loadWorkout() {
   wo.data = r.body;
   wo.restSec = Math.round(r.body.rest_minutes * 60);
   wo.steps = buildSteps(r.body.day);
-  // flatten with seq + step_index
   wo.flat = [];
   wo.steps.forEach((step, si) => step.entries.forEach(e =>
-    wo.flat.push({ ...e, step_index: si, seq: wo.flat.length, weight: '', reps: '' })));
+    wo.flat.push({ ...e, exercise_id: e.ex_id, step_index: si, seq: wo.flat.length, weight: '', reps: '' })));
+  // last-time lookup by exercise ID + set number (link survives edits);
+  // legacy entries without an ID fall back to name + set number.
+  wo.lastMap = new Map();
+  if (r.body.last_same_day) for (const le of r.body.last_same_day.entries) {
+    if (le.exercise_id) wo.lastMap.set(le.exercise_id + ':' + le.set_number, le);
+    wo.lastMap.set('name:' + le.exercise_name + ':' + le.set_number, le);
+  }
   $('workout-day-label').textContent = 'Day ' + r.body.day_label;
-  $('workout-sub').textContent = `${wo.steps.length} sets • ${r.body.rest_minutes} min between sets`;
+  $('workout-sub').textContent = `${r.body.schedule_name} • ${wo.steps.length} sets • ${r.body.rest_minutes} min between sets`;
   $('timer-display').textContent = fmtClock(wo.restSec);
   $('timer-fill').style.width = '0%';
   $('btn-start').disabled = false; $('btn-end-early').disabled = true;
   renderWorkoutTable();
 }
-function lastEntryFor(seq) {
-  const last = wo.data && wo.data.last_same_day;
-  if (!last) return null;
-  return last.entries.find(e => e.seq === seq) || null;
+$('wo-schedule-picker').onchange = e => {
+  const id = Number(e.target.value);
+  if (wo.data && id === wo.data.schedule_id) return;
+  if (wo.running && !confirm('A workout timer is running. Switch schedules and discard this workout?')) {
+    e.target.value = wo.data.schedule_id; return;
+  }
+  loadWorkout(id);
+};
+function lastEntryFor(flat) {
+  return wo.lastMap.get(flat.exercise_id + ':' + flat.set_number)
+      || wo.lastMap.get('name:' + flat.name + ':' + flat.set_number) || null;
 }
 function renderWorkoutTable() {
   const body = $('workout-body');
@@ -374,16 +511,13 @@ function renderWorkoutTable() {
   wo.steps.forEach((step, si) => {
     html += `<div class="step" id="step-${si}">`;
     wo.flat.filter(f => f.step_index === si).forEach(flat => {
-      const e = flat;
-      const le = lastEntryFor(flat.seq);
-      const ssTag = e.group_id ? '<span class="ss-tag">SS</span>' : '';
+      const le = lastEntryFor(flat);
+      const ssTag = flat.group_id ? '<span class="ss-tag">SS</span>' : '';
       let left;
       if (last) {
-        left = le
-          ? `<div class="exname">${esc(le.exercise_name) || esc(e.name)}${ssTag}</div><div class="exvals">${le.weight != null ? le.weight : '—'} × ${le.reps != null ? le.reps : '—'}</div>`
-          : `<div class="exname">${esc(e.name)}${ssTag}</div><div class="exvals">— × —</div>`;
+        left = `<div class="exname">${esc(flat.name) || '(unnamed)'}${ssTag}</div><div class="exvals">${le ? `${le.weight != null ? le.weight : '—'} × ${le.reps != null ? le.reps : '—'}` : '— × —'}</div>`;
       } else {
-        left = `<div class="exname">${esc(e.name) || '(unnamed)'}${ssTag}</div><div class="settag">Set ${e.set_number}</div>`;
+        left = `<div class="exname">${esc(flat.name) || '(unnamed)'}${ssTag}</div><div class="settag">Set ${flat.set_number}</div>`;
       }
       html += `<div class="wo-row">
         <span class="num">${flat.seq + 1}</span>
@@ -401,7 +535,6 @@ function renderWorkoutTable() {
   });
   highlightStep();
 }
-function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function highlightStep() {
   wo.steps.forEach((_, si) => {
     const el = $('step-' + si); if (!el) return;
@@ -436,6 +569,7 @@ function startTimer() {
   try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch (e) {}
   if (navigator.wakeLock) navigator.wakeLock.request('screen').then(w => wo.wakeLock = w).catch(() => {});
   $('btn-start').disabled = true; $('btn-end-early').disabled = false;
+  $('wo-schedule-picker').disabled = true;
   wo.deadline = Date.now() + wo.restSec * 1000;
   clearInterval(wo.timerId);
   wo.timerId = setInterval(tick, 200);
@@ -452,10 +586,11 @@ function tick() {
   wo.deadline = Date.now() + wo.restSec * 1000;
   highlightStep();
 }
-function stopTimer(releaseWake = true) {
+function stopTimer() {
   if (wo.timerId) clearInterval(wo.timerId);
   wo.timerId = null; wo.running = false;
-  if (releaseWake && wo.wakeLock) { wo.wakeLock.release().catch(() => {}); wo.wakeLock = null; }
+  if (wo.wakeLock) { wo.wakeLock.release().catch(() => {}); wo.wakeLock = null; }
+  const p = $('wo-schedule-picker'); if (p) p.disabled = false;
 }
 $('btn-start').onclick = startTimer;
 $('btn-end-early').onclick = () => { if (wo.running) finishWorkout(true); };
@@ -469,8 +604,8 @@ function finishWorkout(early) {
   $('modal-title').textContent = early ? 'End workout early?' : 'Workout complete 🎉';
   const doneEntries = collectEntries(early).length;
   $('modal-text').textContent = early
-    ? `Save the ${doneEntries} set(s) done so far? This counts as today's Day ${wo.data.day_label} — next time you'll move to the next day.`
-    : `Save this Day ${wo.data.day_label} workout to your history?`;
+    ? `Save the ${doneEntries} set(s) done so far? This counts as today's Day ${wo.data.day_label} on "${wo.data.schedule_name}" — next time on this schedule you'll move to the next day.`
+    : `Save this Day ${wo.data.day_label} workout (${wo.data.schedule_name}) to your history?`;
   $('modal-resume').style.display = early ? 'block' : 'none';
   $('modal-backdrop').style.display = 'flex';
 }
@@ -479,7 +614,8 @@ function collectEntries(early) {
     .filter(f => !early || f.step_index < wo.current || f.weight !== '' || f.reps !== '')
     .filter(f => !early || f.step_index <= wo.current)
     .map(f => ({
-      step_index: f.step_index, exercise_name: f.name, set_number: f.set_number,
+      step_index: f.step_index, exercise_id: f.exercise_id,
+      exercise_name: f.name, set_number: f.set_number,
       group_id: f.group_id, group_mode: f.group_mode,
       weight: f.weight === '' ? null : Number(f.weight),
       reps: f.reps === '' ? null : Number(f.reps)
@@ -487,20 +623,20 @@ function collectEntries(early) {
 }
 $('modal-resume').onclick = () => {
   $('modal-backdrop').style.display = 'none';
-  // resume where we left off with a fresh timer for the current step
   wo.running = true;
   $('btn-start').disabled = true; $('btn-end-early').disabled = false;
+  $('wo-schedule-picker').disabled = true;
   wo.deadline = Date.now() + wo.restSec * 1000;
   clearInterval(wo.timerId); wo.timerId = setInterval(tick, 200);
   highlightStep();
 };
-$('modal-discard').onclick = () => { $('modal-backdrop').style.display = 'none'; loadWorkout(); };
+$('modal-discard').onclick = () => { $('modal-backdrop').style.display = 'none'; loadWorkout(wo.data ? wo.data.schedule_id : undefined); };
 $('modal-save').onclick = async () => {
-  const payload = { day_index: wo.data.day_index, date: todayYMD(), ended_early: pendingEarly, entries: collectEntries(pendingEarly) };
-  const r = await api('/workouts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const payload = { schedule_id: wo.data.schedule_id, day_index: wo.data.day_index, date: todayYMD(), ended_early: pendingEarly, entries: collectEntries(pendingEarly) };
+  const r = await api('/workouts', jsonOpts('POST', payload));
   $('modal-backdrop').style.display = 'none';
   if (r.body.ok) { toast('Workout saved ✓'); showView('history'); }
-  else { toast('Save failed — please try again'); loadWorkout(); }
+  else { toast('Save failed — please try again'); loadWorkout(wo.data.schedule_id); }
 };
 
 /* ---------- HISTORY ---------- */
@@ -520,6 +656,7 @@ async function loadHistory() {
     card.innerHTML = `
       <div class="hist-head"><span class="hist-day">Day ${w.day_label}</span>
       <span class="hist-date">${fmtDate(w.date)}</span>
+      ${w.schedule_name ? `<span class="badge sched">${esc(w.schedule_name)}</span>` : ''}
       ${w.ended_early ? '<span class="badge">ENDED EARLY</span>' : ''}
       <span class="muted">${w.entries.length} sets</span></div>
       <div class="hist-sets">${rows || '<span class="muted">No sets recorded</span>'}</div>`;
