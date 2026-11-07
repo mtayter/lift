@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14161a">
+<title>Lift Log</title>
+<link rel="stylesheet" href="/lift/static/styles.css">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+
+<!-- ============ SIGN IN ============ -->
+<div class="screen" id="screen-signin">
+  <div class="hero">
+    <div class="logo">🏋️</div>
+    <h1>LIFT <span class="accent">LOG</span></h1>
+    <p>Design your split. Run the workout on a rest timer. Beat last time.</p>
+    <div id="sso-box"></div>
+    <div id="signin-error" class="error"></div>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<div class="screen" id="screen-app" style="display:none">
+  <header id="topbar">
+    <div class="brand">LIFT <span class="accent">LOG</span></div>
+    <nav>
+      <button class="navbtn" id="nav-workout">Workout</button>
+      <button class="navbtn" id="nav-edit">Edit</button>
+      <button class="navbtn" id="nav-history">History</button>
+      <button class="navbtn" id="nav-logout">Logout</button>
+    </nav>
+    <div class="userchip">
+      <img id="user-pic" alt="" style="display:none">
+      <span id="user-name"></span>
+    </div>
+  </header>
+
+  <!-- ===== WORKOUT ===== -->
+  <section class="view" id="view-workout">
+    <div id="workout-controls">
+      <div class="wc-left">
+        <div id="workout-day-label">Day –</div>
+        <div id="workout-sub"></div>
+      </div>
+      <div class="wc-right">
+        <div id="timer-display">--:--</div>
+        <button class="btn primary" id="btn-start">Start</button>
+        <button class="btn danger" id="btn-end-early" disabled>End Early</button>
+      </div>
+      <div id="timer-bar"><div id="timer-fill"></div></div>
+    </div>
+    <div id="workout-body"></div>
+  </section>
+
+  <!-- ===== EDIT ===== -->
+  <section class="view" id="view-edit" style="display:none">
+    <div class="edit-head">
+      <h2>Your Split</h2>
+      <button class="btn primary" id="btn-save-schedule">Save Schedule</button>
+    </div>
+    <div class="rest-row">
+      <label for="rest-input">Time between sets</label>
+      <input id="rest-input" type="number" inputmode="decimal" min="0.25" max="60" step="0.25">
+      <span class="unit">min</span>
+      <span class="muted">Per-day totals update below as you edit.</span>
+    </div>
+    <div id="save-msg"></div>
+    <div id="days-container"></div>
+    <button class="btn block" id="btn-add-day">+ Add Day</button>
+  </section>
+
+  <!-- ===== HISTORY ===== -->
+  <section class="view" id="view-history" style="display:none">
+    <h2>History</h2>
+    <div id="history-list"></div>
+  </section>
+</div>
+
+<!-- ============ SAVE PROMPT MODAL ============ -->
+<div id="modal-backdrop" style="display:none">
+  <div class="modal">
+    <h3 id="modal-title">Workout complete</h3>
+    <p id="modal-text"></p>
+    <div class="modal-btns">
+      <button class="btn primary" id="modal-save">Save Workout</button>
+      <button class="btn" id="modal-resume">Keep Going</button>
+      <button class="btn danger" id="modal-discard">Discard</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" style="display:none"></div>
+
+<script src="/lift/static/app.js"></script>
+</body>
+</html>

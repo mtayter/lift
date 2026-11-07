@@ -1,0 +1,14 @@
+# Template: replace <user> and the checkout path with real values.
+[Unit]
+Description=Lift Log - lifting schedule + workout timer
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/<user>/lift
+ExecStart=/usr/bin/python3 /home/<user>/lift/server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
