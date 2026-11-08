@@ -97,7 +97,7 @@ with db_lock:
       id INTEGER PRIMARY KEY, workout_id INTEGER, seq INTEGER,
       step_index INTEGER, exercise_id TEXT, exercise_name TEXT,
       set_number INTEGER, group_id TEXT, group_mode TEXT,
-      weight REAL, reps INTEGER);
+      weight REAL, band TEXT, reps INTEGER);
     """)
     # Column additions must land before the schedules migration below,
     # whose UPDATE touches workouts.schedule_id.
@@ -107,6 +107,8 @@ with db_lock:
         db.execute("ALTER TABLE workouts ADD COLUMN schedule_name TEXT")
     if "exercise_id" not in _cols("workout_sets"):
         db.execute("ALTER TABLE workout_sets ADD COLUMN exercise_id TEXT")
+    if "band" not in _cols("workout_sets"):
+        db.execute("ALTER TABLE workout_sets ADD COLUMN band TEXT")
     # v1 -> v2 migration: v1 schedules was (user_id PK, data, updated_at)
     if _cols("schedules") and "id" not in _cols("schedules"):
         db.execute("ALTER TABLE schedules RENAME TO schedules_v1")
@@ -209,6 +211,17 @@ def user_id_for_token(token):
 
 
 # ---- pure schedule logic (no DB) ----
+def clean_band(v):
+    """Canonical band combo: any subset of L/M/H as 'M+H' (ascending
+    L<M<H, '+'-joined). Empty/invalid -> None."""
+    if not v:
+        return None
+    letters = {c for c in str(v).upper() if c in "LMH"}
+    if not letters:
+        return None
+    return "+".join(c for c in "LMH" if c in letters)
+
+
 def day_label(idx):
     return chr(ord("A") + idx) if 0 <= idx < 26 else f"#{idx + 1}"
 
@@ -255,8 +268,11 @@ def validate_schedule(raw):
                 gid = str(gid)[:40]
             ex_id = ex.get("id")
             ex_id = str(ex_id)[:40] if ex_id else uuid.uuid4().hex[:12]
+            measure = ex.get("measure")
+            if measure not in ("weight", "band", "bodyweight"):
+                measure = "weight"
             clean_exs.append({"id": ex_id, "name": name, "sets": sets,
-                              "group_id": gid})
+                              "group_id": gid, "measure": measure})
         clean_groups = {}
         seen = {}
         for i, ex in enumerate(clean_exs):
@@ -437,7 +453,7 @@ class UserDB:
             return db.execute(
                 "SELECT ws.id, ws.seq, ws.step_index, ws.exercise_id,"
                 " ws.exercise_name, ws.set_number, ws.group_id,"
-                " ws.group_mode, ws.weight, ws.reps FROM workout_sets ws"
+                " ws.group_mode, ws.weight, ws.band, ws.reps FROM workout_sets ws"
                 " JOIN workouts w ON w.id = ws.workout_id"
                 " WHERE ws.workout_id=? AND w.user_id=? ORDER BY ws.seq",
                 (workout_id, self.uid)).fetchall()
@@ -463,23 +479,24 @@ class UserDB:
             db.executemany(
                 "INSERT INTO workout_sets(workout_id,seq,step_index,"
                 "exercise_id,exercise_name,set_number,group_id,group_mode,"
-                "weight,reps) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "weight,band,reps) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 [(wid, e["seq"], e["step_index"], e["exercise_id"],
                   e["exercise_name"], e["set_number"], e["group_id"],
-                  e["group_mode"], e["weight"], e["reps"]) for e in entries])
+                  e["group_mode"], e["weight"], e["band"], e["reps"])
+                 for e in entries])
             db.commit()
             return wid
 
-    def update_workout_set(self, set_id, name, weight, reps):
+    def update_workout_set(self, set_id, name, weight, band, reps):
         """Edit one saved set. The UPDATE itself is ownership-guarded:
         the EXISTS clause means a foreign set id updates nothing.
         Returns the updated row, or None if not this user's set."""
         with db_lock:
             cur = db.execute(
-                "UPDATE workout_sets SET exercise_name=?, weight=?, reps=?"
-                " WHERE id=? AND EXISTS (SELECT 1 FROM workouts w"
+                "UPDATE workout_sets SET exercise_name=?, weight=?, band=?,"
+                " reps=? WHERE id=? AND EXISTS (SELECT 1 FROM workouts w"
                 " WHERE w.id = workout_sets.workout_id AND w.user_id=?)",
-                (name, weight, reps, set_id, self.uid))
+                (name, weight, band, reps, set_id, self.uid))
             db.commit()
             if cur.rowcount == 0:
                 return None
@@ -753,7 +770,9 @@ class Handler(BaseHTTPRequestHandler):
                     "group_mode": (e.get("group_mode")
                                    if e.get("group_mode") in ("entire", "each")
                                    else None),
-                    "weight": num(e.get("weight"), float),
+                    "band": clean_band(e.get("band")),
+                    "weight": (None if clean_band(e.get("band"))
+                               else num(e.get("weight"), float)),
                     "reps": num(e.get("reps"), int)})
             wid = udb.insert_workout(sid, row["name"], day_idx, date_str,
                                      bool(p.get("ended_early")),
@@ -790,7 +809,10 @@ class Handler(BaseHTTPRequestHandler):
                (reps is not None and reps < 0):
                 return self._json(400, {"ok": False,
                                         "error": "weight/reps can't be negative"})
-            entry = udb.update_workout_set(set_id, name, weight, reps)
+            band = clean_band(p.get("band"))
+            if band:
+                weight = None
+            entry = udb.update_workout_set(set_id, name, weight, band, reps)
             if entry is None:
                 return self._json(404, {"ok": False})
             return self._json(200, {"ok": True, "entry": entry})

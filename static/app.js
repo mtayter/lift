@@ -69,7 +69,7 @@ function groupOf(day, idx) {
 // Each step is one counted "set": {entries:[{name, ex_id, set_number, group_id, group_mode}]}
 function buildSteps(day) {
   const steps = []; let i = 0;
-  const entry = (ex, s, mode) => ({ name: ex.name, ex_id: ex.id, set_number: s, group_id: ex.group_id && mode ? ex.group_id : null, group_mode: mode || null });
+  const entry = (ex, s, mode) => ({ name: ex.name, ex_id: ex.id, set_number: s, group_id: ex.group_id && mode ? ex.group_id : null, group_mode: mode || null, measure: ex.measure || 'weight' });
   while (i < day.exercises.length) {
     const ex = day.exercises[i];
     const g = groupOf(day, i);
@@ -280,7 +280,7 @@ function renderEdit() {
         <button class="iconbtn" data-act="day-del" ${schedule.days.length <= 1 ? 'disabled' : ''} title="Remove day">🗑</button>
         <span class="day-total" id="day-total-${di}">${total} sets<br>${fmtMins(schedule.rest_minutes * total)} total</span>
       </div>
-      <div class="col-heads"><span></span><span></span><span>Exercise</span><span>Sets</span><span></span></div>
+      <div class="col-heads"><span></span><span></span><span>Exercise</span><span>Sets</span><span>Measure</span><span></span></div>
       <div class="ex-list"></div>
       <button class="btn add-ex" data-act="ex-add">+ Add Exercise</button>`;
     const list = card.querySelector('.ex-list');
@@ -329,7 +329,13 @@ function exRowEl(day, ex, ei, g) {
     </span>
     ${sharedCell ? '<span class="shared">shared</span>' :
       `<input type="number" min="1" max="20" step="1" value="${ex.sets}" inputmode="numeric" title="Sets">`}
+    <select class="ex-measure" title="How this exercise is measured" aria-label="Measure">
+      ${['weight', 'band', 'bodyweight'].map(m =>
+        `<option value="${m}" ${(ex.measure || 'weight') === m ? 'selected' : ''}>${m === 'weight' ? 'Weight' : m === 'band' ? 'Band' : 'Bodyweight'}</option>`).join('')}
+    </select>
     <button class="iconbtn" data-x="del" ${day.exercises.length <= 1 ? 'disabled' : ''} title="Remove exercise">🗑</button>`;
+  const measureSel = row.querySelector('.ex-measure');
+  measureSel.onchange = () => { ex.measure = measureSel.value; markDirty(); };
   const [nameIn, setsIn] = [row.querySelector('input[type=text]'), row.querySelector('input[type=number]')];
   nameIn.oninput = () => { ex.name = nameIn.value; if (linked) flagLinkedEdit(); markDirty(); };
   if (setsIn) setsIn.oninput = () => {
@@ -476,7 +482,7 @@ async function loadWorkout(preferredId) {
   wo.steps = buildSteps(r.body.day);
   wo.flat = [];
   wo.steps.forEach((step, si) => step.entries.forEach(e =>
-    wo.flat.push({ ...e, exercise_id: e.ex_id, step_index: si, seq: wo.flat.length, weight: '', reps: '' })));
+    wo.flat.push({ ...e, exercise_id: e.ex_id, step_index: si, seq: wo.flat.length, weight: '', reps: '', band: '' })));
   // last-time lookup by exercise ID + set number (link survives edits);
   // legacy entries without an ID fall back to name + set number.
   wo.lastMap = new Map();
@@ -515,17 +521,24 @@ function renderWorkoutTable() {
       const ssTag = flat.group_id ? '<span class="ss-tag">SS</span>' : '';
       let left;
       if (last) {
-        left = `<div class="exname">${esc(flat.name) || '(unnamed)'}${ssTag}</div><div class="exvals">${le ? `${le.weight != null ? le.weight : '—'} × ${le.reps != null ? le.reps : '—'}` : '— × —'}</div>`;
+        left = `<div class="exname">${esc(flat.name) || '(unnamed)'}${ssTag}</div><div class="exvals">${le ? valText(le, flat.measure) : '— × —'}</div>`;
       } else {
         left = `<div class="exname">${esc(flat.name) || '(unnamed)'}${ssTag}</div><div class="settag">Set ${flat.set_number}</div>`;
+      }
+      const repsIn = `<input type="number" inputmode="numeric" step="1" min="0" placeholder="${le && le.reps != null ? le.reps : 'reps'}" data-seq="${flat.seq}" data-field="reps" aria-label="Reps">`;
+      let inputs;
+      if (flat.measure === 'band') {
+        inputs = `<div class="band-picker" data-seq="${flat.seq}">${['L', 'M', 'H'].map(b =>
+          `<button type="button" class="band-btn" data-b="${b}" aria-label="Band ${b}">${b}</button>`).join('')}</div>` + repsIn;
+      } else if (flat.measure === 'bodyweight') {
+        inputs = `<span class="bw-label">BW</span>` + repsIn;
+      } else {
+        inputs = `<input type="number" inputmode="decimal" step="any" min="0" placeholder="${le && le.weight != null ? le.weight : 'wt'}" data-seq="${flat.seq}" data-field="weight" aria-label="Weight">` + repsIn;
       }
       html += `<div class="wo-row">
         <span class="num">${flat.seq + 1}</span>
         <div class="wo-cell">${left}</div>
-        <div class="inputs">
-          <input type="number" inputmode="decimal" step="any" min="0" placeholder="${le && le.weight != null ? le.weight : 'wt'}" data-seq="${flat.seq}" data-field="weight" aria-label="Weight">
-          <input type="number" inputmode="numeric" step="1" min="0" placeholder="${le && le.reps != null ? le.reps : 'reps'}" data-seq="${flat.seq}" data-field="reps" aria-label="Reps">
-        </div></div>`;
+        <div class="inputs">${inputs}</div></div>`;
     });
     html += '</div>';
   });
@@ -533,7 +546,24 @@ function renderWorkoutTable() {
   body.querySelectorAll('input[data-seq]').forEach(inp => {
     inp.oninput = () => { wo.flat[Number(inp.dataset.seq)][inp.dataset.field] = inp.value; };
   });
+  body.querySelectorAll('.band-picker').forEach(p => {
+    p.querySelectorAll('.band-btn').forEach(btn => {
+      btn.onclick = () => {
+        btn.classList.toggle('on');
+        const seq = Number(p.dataset.seq);
+        wo.flat[seq].band = ['L', 'M', 'H']
+          .filter(b => p.querySelector(`[data-b="${b}"]`).classList.contains('on'))
+          .join('+');
+      };
+    });
+  });
   highlightStep();
+}
+function valText(le, measure) {
+  const reps = le.reps != null ? le.reps : '—';
+  if (le.band) return `${le.band} × ${reps}`;
+  if (measure === 'bodyweight') return `BW × ${reps}`;
+  return `${le.weight != null ? le.weight : '—'} × ${reps}`;
 }
 function highlightStep() {
   wo.steps.forEach((_, si) => {
@@ -611,13 +641,14 @@ function finishWorkout(early) {
 }
 function collectEntries(early) {
   return wo.flat
-    .filter(f => !early || f.step_index < wo.current || f.weight !== '' || f.reps !== '')
+    .filter(f => !early || f.step_index < wo.current || f.weight !== '' || f.reps !== '' || f.band !== '')
     .filter(f => !early || f.step_index <= wo.current)
     .map(f => ({
       step_index: f.step_index, exercise_id: f.exercise_id,
       exercise_name: f.name, set_number: f.set_number,
       group_id: f.group_id, group_mode: f.group_mode,
-      weight: f.weight === '' ? null : Number(f.weight),
+      band: f.band === '' ? null : f.band,
+      weight: f.band !== '' ? null : (f.weight === '' ? null : Number(f.weight)),
       reps: f.reps === '' ? null : Number(f.reps)
     }));
 }
@@ -677,29 +708,46 @@ function histRowEl(e) {
   row.className = 'hrow' + (editingSetId === e.id ? ' editing' : '');
   if (editingSetId !== e.id) {
     row.innerHTML = `<span class="hn">${e.seq + 1}</span><span>${esc(e.exercise_name) || '(unnamed)'}${e.group_mode ? ' <span class="ss-tag">SS</span>' : ''}</span>
-      <span class="hv">${e.weight != null ? e.weight : '—'} × ${e.reps != null ? e.reps : '—'}</span>`;
+      <span class="hv">${e.band ? e.band : (e.weight != null ? e.weight : '—')} × ${e.reps != null ? e.reps : '—'}</span>`;
     row.title = 'Tap to edit';
     row.onclick = () => { editingSetId = e.id; renderHistory(); };
     return row;
   }
-  // editing: row becomes text boxes with Save next to it
+  // editing: row becomes inputs with Save next to it — band entries get
+  // the L/M/H chip picker instead of the numeric weight box
+  const mid = e.band != null
+    ? `<div class="band-picker">${['L', 'M', 'H'].map(b =>
+        `<button type="button" class="band-btn${e.band.split('+').includes(b) ? ' on' : ''}" data-b="${b}" aria-label="Band ${b}">${b}</button>`).join('')}</div>`
+    : `<input class="hnum hw" type="number" inputmode="decimal" step="any" min="0" value="${e.weight != null ? e.weight : ''}" placeholder="wt" aria-label="Weight">`;
   row.innerHTML = `<span class="hn">${e.seq + 1}</span>
     <input class="hname" type="text" value="${esc(e.exercise_name)}" placeholder="Exercise" autocomplete="off" aria-label="Exercise name">
-    <input class="hnum hw" type="number" inputmode="decimal" step="any" min="0" value="${e.weight != null ? e.weight : ''}" placeholder="wt" aria-label="Weight">
+    ${mid}
     <input class="hnum hr" type="number" inputmode="numeric" step="1" min="0" value="${e.reps != null ? e.reps : ''}" placeholder="reps" aria-label="Reps">
     <button class="hbtn save">Save</button>
     <button class="hbtn cancel">Cancel</button>`;
+  const picker = row.querySelector('.band-picker');
+  if (picker) picker.querySelectorAll('.band-btn').forEach(btn =>
+    btn.onclick = () => btn.classList.toggle('on'));
   row.querySelector('.cancel').onclick = () => { editingSetId = null; renderHistory(); };
   row.querySelector('.save').onclick = async () => {
     const payload = {
       exercise_name: row.querySelector('.hname').value,
-      weight: row.querySelector('.hw').value === '' ? null : Number(row.querySelector('.hw').value),
       reps: row.querySelector('.hr').value === '' ? null : Number(row.querySelector('.hr').value)
     };
+    if (picker) {
+      payload.band = ['L', 'M', 'H']
+        .filter(b => picker.querySelector(`[data-b="${b}"]`).classList.contains('on'))
+        .join('+') || null;
+      payload.weight = null;
+    } else {
+      payload.band = null;
+      payload.weight = row.querySelector('.hw').value === '' ? null : Number(row.querySelector('.hw').value);
+    }
     const r = await api('/workout-sets/' + e.id, jsonOpts('PUT', payload));
     if (r.body.ok) {
       e.exercise_name = r.body.entry.exercise_name;
       e.weight = r.body.entry.weight;
+      e.band = r.body.entry.band;
       e.reps = r.body.entry.reps;
       editingSetId = null;
       renderHistory();

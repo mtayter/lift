@@ -200,6 +200,54 @@ try:
           a_workout["entries"][0]["weight"] == 105.5
           and a_workout["entries"][0]["exercise_name"] == "Bench Press")
 
+    # --- band / bodyweight measures ---
+    s, b = call("POST", "/api/schedules",
+                {"name": "BandTest", "schedule": {
+                    "rest_minutes": 2, "days": [{"exercises": [
+                        {"name": "Band Row", "sets": 2, "measure": "band"},
+                        {"name": "Push-up", "sets": 2,
+                         "measure": "bodyweight"},
+                        {"name": "Curl", "sets": 1}], "groups": {}}]}}, H)
+    check("band schedule created", s == 200 and b.get("ok"), str(b)[:120])
+    band_sid = b["id"]
+    ms = [e["measure"] for e in b["schedule"]["days"][0]["exercises"]]
+    check("measures stored + weight default",
+          ms == ["band", "bodyweight", "weight"], str(ms))
+    ids = {e["name"]: e["id"] for e in b["schedule"]["days"][0]["exercises"]}
+    s, b = call("POST", "/api/workouts",
+                {"schedule_id": band_sid, "day_index": 0,
+                 "date": "2026-11-07", "ended_early": False, "entries": [
+                     {"step_index": 0, "exercise_id": ids["Band Row"],
+                      "exercise_name": "Band Row", "set_number": 1,
+                      "band": "H+M", "weight": 999, "reps": 15},
+                     {"step_index": 1, "exercise_id": ids["Band Row"],
+                      "exercise_name": "Band Row", "set_number": 2,
+                      "band": "h", "weight": None, "reps": 12},
+                     {"step_index": 2, "exercise_id": ids["Push-up"],
+                      "exercise_name": "Push-up", "set_number": 1,
+                      "band": None, "weight": None, "reps": 20},
+                     {"step_index": 3, "exercise_id": ids["Curl"],
+                      "exercise_name": "Curl", "set_number": 1,
+                      "band": "X", "weight": 20, "reps": 10}]}, H)
+    check("band workout saved", b.get("ok"), str(b)[:120])
+    s, b = call("GET", f"/api/workout/today?schedule_id={band_sid}",
+                headers=H)
+    ent = b["last_same_day"]["entries"]
+    check("band canonicalized H+M -> M+H, weight dropped",
+          ent[0]["band"] == "M+H" and ent[0]["weight"] is None, str(ent[0]))
+    check("band case-normalized", ent[1]["band"] == "H")
+    check("bodyweight entry has no weight/band",
+          ent[2]["weight"] is None and ent[2]["band"] is None)
+    check("invalid band cleared, weight kept",
+          ent[3]["band"] is None and ent[3]["weight"] == 20)
+    s, b = call("PUT", f"/api/workout-sets/{ent[0]['id']}",
+                {"exercise_name": "Band Row", "weight": None, "band": "L",
+                 "reps": 15}, H)
+    check("history edit band", b.get("ok") and b["entry"]["band"] == "L"
+          and b["entry"]["weight"] is None, str(b)[:140])
+    s, b = call("DELETE", f"/api/schedules/{band_sid}", headers=H)
+    check("band test schedule deleted", b.get("ok"))
+
     # --- delete rules ---
     s, b = call("DELETE", f"/api/schedules/{copy_id}", headers=H)
     check("delete copy ok", b.get("ok"))
