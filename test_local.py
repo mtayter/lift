@@ -66,10 +66,17 @@ check("UserDB wrapper exists and is uid-bound",
       "class UserDB" in _src and "def __init__(self, uid)" in _src)
 
 # ============ part 1: fresh v2 flow ============
+def version_checks():
+    s, b = call("GET", "/api/version")
+    v1 = b.get("version")
+    s, b = call("GET", "/api/version")
+    check("version endpoint stable + present",
+          bool(v1) and b.get("version") == v1, str(v1))
 scratch = "/tmp/lift-test2"
 proc = boot(scratch)
 try:
     H = seed_session(scratch)
+    version_checks()
     s, b = call("GET", "/api/me", headers=H)
     check("me: no schedule yet", b.get("signed_in") and not b.get("has_schedule"))
 

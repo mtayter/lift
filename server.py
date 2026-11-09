@@ -132,6 +132,25 @@ with db_lock:
         data TEXT, created_at TEXT, updated_at TEXT)""")
     db.commit()
 
+def _app_version():
+    """Deploy fingerprint: hash of the server + static assets. Clients
+    poll /api/version and reload when it changes (only when safe —
+    never mid-workout or with unsaved edits)."""
+    h = hashlib.sha256()
+    for p in (os.path.join(HERE, "server.py"),
+              os.path.join(STATIC, "index.html"),
+              os.path.join(STATIC, "app.js"),
+              os.path.join(STATIC, "styles.css")):
+        try:
+            with open(p, "rb") as f:
+                h.update(f.read())
+        except OSError:
+            pass
+    return h.hexdigest()[:12]
+
+
+APP_VERSION = _app_version()
+
 TOKENINFO = "https://oauth2.googleapis.com/tokeninfo"
 MIME = {".html": "text/html; charset=utf-8", ".css": "text/css",
         ".js": "application/javascript", ".png": "image/png",
@@ -588,6 +607,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             return self._json(200, {"google_client_id":
                                     config.get("google_client_id", "")})
+        if path == "/api/version":
+            return self._json(200, {"ok": True, "version": APP_VERSION})
         if path == "/api/me":
             udb = self._udb()
             if not udb:

@@ -759,5 +759,41 @@ function histRowEl(e) {
   return row;
 }
 
+/* ---------- auto-update ----------
+   The server fingerprints its code + assets at /api/version. When the
+   fingerprint changes (a deploy happened), reload to pick up the new
+   version — but only when safe: never while a workout timer is running,
+   never with unsaved Edit changes, never over the save modal. If it's
+   not safe, note it and keep re-checking; the reload lands at the
+   first safe moment. A sessionStorage guard prevents reload loops. */
+let appVersion = null, updatePending = false;
+function updateIsSafe() {
+  return !wo.running && !editDirty &&
+    $('modal-backdrop').style.display !== 'flex';
+}
+async function checkForUpdate(first) {
+  try {
+    const r = await api('/version');
+    if (!r.body || !r.body.version) return;
+    if (first || appVersion === null) { appVersion = r.body.version; return; }
+    if (r.body.version === appVersion) return;
+    if (!updateIsSafe()) {
+      if (!updatePending) {
+        updatePending = true;
+        toast('App update available — it will apply when you finish what you are doing');
+      }
+      return;
+    }
+    if (sessionStorage.getItem('liftReloadedFor') === r.body.version) return;
+    sessionStorage.setItem('liftReloadedFor', r.body.version);
+    location.reload();
+  } catch (e) { /* offline / transient — next check will retry */ }
+}
+checkForUpdate(true);
+setInterval(() => checkForUpdate(false), 60000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) checkForUpdate(false);
+});
+
 /* ---------- boot ---------- */
 initAuth();
