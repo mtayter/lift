@@ -597,6 +597,7 @@ function startTimer() {
   if (!wo.steps.length) return;
   wo.running = true; wo.current = 0;
   try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch (e) {}
+  beep3();   // audible "go" when the workout starts (Mike, 2026-11-11)
   if (navigator.wakeLock) navigator.wakeLock.request('screen').then(w => wo.wakeLock = w).catch(() => {});
   $('btn-start').disabled = true; $('btn-end-early').disabled = false;
   $('wo-schedule-picker').disabled = true;
