@@ -462,6 +462,7 @@ function freshWorkoutState() {
   return { running: false, steps: [], flat: [], current: 0, deadline: 0, timerId: null, restSec: 120, data: null, wakeLock: null, lastMap: new Map() };
 }
 let wo = freshWorkoutState();
+let woDirty = false;   // user has typed/tapped unsaved workout values
 
 async function loadWorkout(preferredId) {
   stopTimer();
@@ -480,9 +481,6 @@ async function loadWorkout(preferredId) {
   wo.data = r.body;
   wo.restSec = Math.round(r.body.rest_minutes * 60);
   wo.steps = buildSteps(r.body.day);
-  wo.flat = [];
-  wo.steps.forEach((step, si) => step.entries.forEach(e =>
-    wo.flat.push({ ...e, exercise_id: e.ex_id, step_index: si, seq: wo.flat.length, weight: '', reps: '', band: '' })));
   // last-time lookup by exercise ID + set number (link survives edits);
   // legacy entries without an ID fall back to name + set number.
   wo.lastMap = new Map();
@@ -490,6 +488,26 @@ async function loadWorkout(preferredId) {
     if (le.exercise_id) wo.lastMap.set(le.exercise_id + ':' + le.set_number, le);
     wo.lastMap.set('name:' + le.exercise_name + ':' + le.set_number, le);
   }
+  // Last-time values start as INHERITED defaults: prefilled in light
+  // color and saved as-is unless the user types over them. (An empty
+  // field used to save blank even though the grey placeholder looked
+  // like a recorded value — Sarah lost weights that way, 2026-11-09/11.)
+  wo.flat = [];
+  wo.steps.forEach((step, si) => step.entries.forEach(e => {
+    const f = { ...e, exercise_id: e.ex_id, step_index: si,
+                seq: wo.flat.length, weight: '', reps: '', band: '',
+                lastWeight: null, lastReps: null, lastBand: null,
+                inhWeight: false, inhReps: false, inhBand: false };
+    const le = wo.lastMap.get(f.exercise_id + ':' + f.set_number)
+            || wo.lastMap.get('name:' + f.name + ':' + f.set_number);
+    if (le) {
+      if (le.weight != null) { f.weight = String(le.weight); f.lastWeight = le.weight; f.inhWeight = true; }
+      if (le.reps != null) { f.reps = String(le.reps); f.lastReps = le.reps; f.inhReps = true; }
+      if (le.band) { f.band = le.band; f.lastBand = le.band; f.inhBand = true; }
+    }
+    wo.flat.push(f);
+  }));
+  woDirty = false;
   $('workout-day-label').textContent = 'Day ' + r.body.day_label;
   $('workout-sub').textContent = `${r.body.schedule_name} • ${wo.steps.length} sets • ${r.body.rest_minutes} min between sets`;
   $('timer-display').textContent = fmtClock(wo.restSec);
@@ -525,15 +543,15 @@ function renderWorkoutTable() {
       } else {
         left = `<div class="exname">${esc(flat.name) || '(unnamed)'}${ssTag}</div><div class="settag">Set ${flat.set_number}</div>`;
       }
-      const repsIn = `<input type="number" inputmode="numeric" step="1" min="0" placeholder="${le && le.reps != null ? le.reps : 'reps'}" data-seq="${flat.seq}" data-field="reps" aria-label="Reps">`;
+      const repsIn = `<input type="number" inputmode="numeric" step="1" min="0" value="${flat.reps}" placeholder="reps" class="${flat.inhReps ? 'inherited' : ''}" data-seq="${flat.seq}" data-field="reps" aria-label="Reps">`;
       let inputs;
       if (flat.measure === 'band') {
-        inputs = `<div class="band-picker" data-seq="${flat.seq}">${['L', 'M', 'H'].map(b =>
-          `<button type="button" class="band-btn" data-b="${b}" aria-label="Band ${b}">${b}</button>`).join('')}</div>` + repsIn;
+        inputs = `<div class="band-picker${flat.inhBand ? ' inherited' : ''}" data-seq="${flat.seq}">${['L', 'M', 'H'].map(b =>
+          `<button type="button" class="band-btn${flat.band.split('+').includes(b) ? ' on' : ''}" data-b="${b}" aria-label="Band ${b}">${b}</button>`).join('')}</div>` + repsIn;
       } else if (flat.measure === 'bodyweight') {
         inputs = `<span class="bw-label">BW</span>` + repsIn;
       } else {
-        inputs = `<input type="number" inputmode="decimal" step="any" min="0" placeholder="${le && le.weight != null ? le.weight : 'wt'}" data-seq="${flat.seq}" data-field="weight" aria-label="Weight">` + repsIn;
+        inputs = `<input type="number" inputmode="decimal" step="any" min="0" value="${flat.weight}" placeholder="wt" class="${flat.inhWeight ? 'inherited' : ''}" data-seq="${flat.seq}" data-field="weight" aria-label="Weight">` + repsIn;
       }
       html += `<div class="wo-row">
         <span class="num">${flat.seq + 1}</span>
@@ -544,16 +562,45 @@ function renderWorkoutTable() {
   });
   body.innerHTML = html;
   body.querySelectorAll('input[data-seq]').forEach(inp => {
-    inp.oninput = () => { wo.flat[Number(inp.dataset.seq)][inp.dataset.field] = inp.value; };
+    const flat = wo.flat[Number(inp.dataset.seq)];
+    const inhKey = inp.dataset.field === 'weight' ? 'inhWeight' : 'inhReps';
+    inp.oninput = () => {
+      flat[inp.dataset.field] = inp.value;
+      if (inp.value !== '') {   // typing takes ownership of the value
+        inp.classList.remove('inherited');
+        flat[inhKey] = false;
+        woDirty = true;
+      }
+    };
+    inp.onblur = () => {
+      // Blur with an empty box restores the light-colored last-time
+      // default instead of leaving a blank that would save as blank.
+      if (inp.value.trim() !== '') return;
+      const last = inp.dataset.field === 'weight' ? flat.lastWeight : flat.lastReps;
+      if (last != null) {
+        inp.value = last;
+        flat[inp.dataset.field] = String(last);
+        inp.classList.add('inherited');
+        flat[inhKey] = true;
+      } else {
+        flat[inp.dataset.field] = '';
+      }
+    };
   });
   body.querySelectorAll('.band-picker').forEach(p => {
     p.querySelectorAll('.band-btn').forEach(btn => {
       btn.onclick = () => {
-        btn.classList.toggle('on');
         const seq = Number(p.dataset.seq);
-        wo.flat[seq].band = ['L', 'M', 'H']
+        const flat = wo.flat[seq];
+        if (flat.inhBand) {   // first tap takes ownership of the picker
+          flat.inhBand = false;
+          p.classList.remove('inherited');
+        }
+        btn.classList.toggle('on');
+        flat.band = ['L', 'M', 'H']
           .filter(b => p.querySelector(`[data-b="${b}"]`).classList.contains('on'))
           .join('+');
+        woDirty = true;
       };
     });
   });
@@ -641,17 +688,29 @@ function finishWorkout(early) {
   $('modal-backdrop').style.display = 'flex';
 }
 function collectEntries(early) {
+  // "filled" for the in-progress step means the user actually typed or
+  // tapped something — inherited defaults alone don't count a step as
+  // started. At save time an empty field falls back to its last-time
+  // value (same rule as blur-restore), so a cleared box never saves
+  // blank when a last-time value exists.
+  const typed = f => (f.weight !== '' && !f.inhWeight) ||
+                     (f.reps !== '' && !f.inhReps) ||
+                     (f.band !== '' && !f.inhBand);
   return wo.flat
-    .filter(f => !early || f.step_index < wo.current || f.weight !== '' || f.reps !== '' || f.band !== '')
+    .filter(f => !early || f.step_index < wo.current || typed(f))
     .filter(f => !early || f.step_index <= wo.current)
-    .map(f => ({
-      step_index: f.step_index, exercise_id: f.exercise_id,
-      exercise_name: f.name, set_number: f.set_number,
-      group_id: f.group_id, group_mode: f.group_mode,
-      band: f.band === '' ? null : f.band,
-      weight: f.band !== '' ? null : (f.weight === '' ? null : Number(f.weight)),
-      reps: f.reps === '' ? null : Number(f.reps)
-    }));
+    .map(f => {
+      const band = f.band !== '' ? f.band : (f.lastBand || null);
+      return {
+        step_index: f.step_index, exercise_id: f.exercise_id,
+        exercise_name: f.name, set_number: f.set_number,
+        group_id: f.group_id, group_mode: f.group_mode,
+        band,
+        weight: band ? null
+          : (f.weight !== '' ? Number(f.weight) : f.lastWeight),
+        reps: f.reps !== '' ? Number(f.reps) : f.lastReps
+      };
+    });
 }
 $('modal-resume').onclick = () => {
   $('modal-backdrop').style.display = 'none';
@@ -667,7 +726,7 @@ $('modal-save').onclick = async () => {
   const payload = { schedule_id: wo.data.schedule_id, day_index: wo.data.day_index, date: todayYMD(), ended_early: pendingEarly, entries: collectEntries(pendingEarly) };
   const r = await api('/workouts', jsonOpts('POST', payload));
   $('modal-backdrop').style.display = 'none';
-  if (r.body.ok) { toast('Workout saved ✓'); showView('history'); }
+  if (r.body.ok) { woDirty = false; toast('Workout saved ✓'); showView('history'); }
   else { toast('Save failed — please try again'); loadWorkout(wo.data.schedule_id); }
 };
 
@@ -769,7 +828,7 @@ function histRowEl(e) {
    first safe moment. A sessionStorage guard prevents reload loops. */
 let appVersion = null, updatePending = false;
 function updateIsSafe() {
-  return !wo.running && !editDirty &&
+  return !wo.running && !editDirty && !woDirty &&
     $('modal-backdrop').style.display !== 'flex';
 }
 async function checkForUpdate(first) {
