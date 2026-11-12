@@ -75,9 +75,16 @@
       <button class="btn primary" id="btn-save-schedule">Save Schedule</button>
     </div>
     <div class="rest-row">
-      <label for="rest-input">Time between sets</label>
-      <input id="rest-input" type="number" inputmode="decimal" min="0.25" max="60" step="0.25">
-      <span class="unit">min</span>
+      <label for="timer-seg">Timer</label>
+      <span class="seg" id="timer-seg">
+        <button type="button" data-timer="yes">Yes</button>
+        <button type="button" data-timer="no">No</button>
+      </span>
+      <span id="rest-controls">
+        <label for="rest-input">Time between sets</label>
+        <input id="rest-input" type="number" inputmode="decimal" min="0.25" max="60" step="0.25">
+        <span class="unit">min</span>
+      </span>
       <span class="muted">Per-day totals update below as you edit.</span>
     </div>
     <div id="save-msg"></div>

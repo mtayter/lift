@@ -43,8 +43,8 @@ Routes (an optional /lift prefix is stripped):
   POST   /api/workouts            {schedule_id, day_index, date, entries,
                                    ended_early}                           (auth)
   GET    /api/history             -> all workouts, newest first           (auth)
-  PUT    /api/workout-sets/<id>   {exercise_name, weight, reps} -> edit
-           one saved set in History (owner only)                          (auth)
+  PUT    /api/workout-sets/<id>   {exercise_name, weight, reps, band?,
+           measure?} -> edit one saved set in History (owner only)
 """
 import copy as _copy
 import hashlib
@@ -109,6 +109,8 @@ with db_lock:
         db.execute("ALTER TABLE workout_sets ADD COLUMN exercise_id TEXT")
     if "band" not in _cols("workout_sets"):
         db.execute("ALTER TABLE workout_sets ADD COLUMN band TEXT")
+    if "measure" not in _cols("workout_sets"):
+        db.execute("ALTER TABLE workout_sets ADD COLUMN measure TEXT")
     # v1 -> v2 migration: v1 schedules was (user_id PK, data, updated_at)
     if _cols("schedules") and "id" not in _cols("schedules"):
         db.execute("ALTER TABLE schedules RENAME TO schedules_v1")
@@ -252,11 +254,17 @@ def validate_schedule(raw):
     `id` (assigned here if missing) — that ID is the history link."""
     if not isinstance(raw, dict):
         return None, "schedule must be an object"
+    # Timer is per-schedule (Edit screen, left of "Time between sets").
+    # Off = no rest input, no per-day total time, and the workout
+    # advances on entered values instead of a countdown. Old schedules
+    # without the key default to on.
+    timer_enabled = raw.get("timer_enabled", True)
+    timer_enabled = bool(timer_enabled) if timer_enabled is not None else True
     try:
         rest = float(raw.get("rest_minutes", 2))
     except (TypeError, ValueError):
         return None, "rest_minutes must be a number"
-    if not (0 < rest <= 60):
+    if timer_enabled and not (0 < rest <= 60):
         return None, "rest_minutes must be between 0 and 60"
     days = raw.get("days")
     if not isinstance(days, list) or not (1 <= len(days) <= 14):
@@ -313,7 +321,8 @@ def validate_schedule(raw):
                 for i in idxs:
                     clean_exs[i]["sets"] = shared
         clean_days.append({"exercises": clean_exs, "groups": clean_groups})
-    return {"rest_minutes": rest, "days": clean_days}, None
+    return {"rest_minutes": rest, "timer_enabled": timer_enabled,
+            "days": clean_days}, None
 
 
 def counted_sets(day):
@@ -425,6 +434,8 @@ class UserDB:
         schedules. Does not touch updated_at, so 'newest' ordering is
         unaffected."""
         data = json.loads(row["data"])
+        # Pre-v2.7 schedules have no timer flag: timer on, as before.
+        data.setdefault("timer_enabled", True)
         changed = False
         for day in data["days"]:
             for ex in day["exercises"]:
@@ -472,7 +483,7 @@ class UserDB:
             return db.execute(
                 "SELECT ws.id, ws.seq, ws.step_index, ws.exercise_id,"
                 " ws.exercise_name, ws.set_number, ws.group_id,"
-                " ws.group_mode, ws.weight, ws.band, ws.reps FROM workout_sets ws"
+                " ws.group_mode, ws.weight, ws.band, ws.measure, ws.reps FROM workout_sets ws"
                 " JOIN workouts w ON w.id = ws.workout_id"
                 " WHERE ws.workout_id=? AND w.user_id=? ORDER BY ws.seq",
                 (workout_id, self.uid)).fetchall()
@@ -498,24 +509,37 @@ class UserDB:
             db.executemany(
                 "INSERT INTO workout_sets(workout_id,seq,step_index,"
                 "exercise_id,exercise_name,set_number,group_id,group_mode,"
-                "weight,band,reps) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "weight,band,measure,reps) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(wid, e["seq"], e["step_index"], e["exercise_id"],
                   e["exercise_name"], e["set_number"], e["group_id"],
-                  e["group_mode"], e["weight"], e["band"], e["reps"])
+                  e["group_mode"], e["weight"], e["band"],
+                  e.get("measure"), e["reps"])
                  for e in entries])
             db.commit()
             return wid
 
-    def update_workout_set(self, set_id, name, weight, band, reps):
+    def update_workout_set(self, set_id, name, weight, band, reps,
+                           measure=None):
         """Edit one saved set. The UPDATE itself is ownership-guarded:
         the EXISTS clause means a foreign set id updates nothing.
-        Returns the updated row, or None if not this user's set."""
+        Returns the updated row, or None if not this user's set.
+        A valid measure updates the stored measure too (so a bodyweight
+        row edited in History stays bodyweight); omitted/invalid leaves
+        the stored measure alone."""
         with db_lock:
-            cur = db.execute(
-                "UPDATE workout_sets SET exercise_name=?, weight=?, band=?,"
-                " reps=? WHERE id=? AND EXISTS (SELECT 1 FROM workouts w"
-                " WHERE w.id = workout_sets.workout_id AND w.user_id=?)",
-                (name, weight, band, reps, set_id, self.uid))
+            if measure in ("weight", "band", "bodyweight"):
+                cur = db.execute(
+                    "UPDATE workout_sets SET exercise_name=?, weight=?,"
+                    " band=?, measure=?, reps=? WHERE id=? AND EXISTS"
+                    " (SELECT 1 FROM workouts w"
+                    " WHERE w.id = workout_sets.workout_id AND w.user_id=?)",
+                    (name, weight, band, measure, reps, set_id, self.uid))
+            else:
+                cur = db.execute(
+                    "UPDATE workout_sets SET exercise_name=?, weight=?, band=?,"
+                    " reps=? WHERE id=? AND EXISTS (SELECT 1 FROM workouts w"
+                    " WHERE w.id = workout_sets.workout_id AND w.user_id=?)",
+                    (name, weight, band, reps, set_id, self.uid))
             db.commit()
             if cur.rowcount == 0:
                 return None
@@ -667,7 +691,9 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "has_schedule": True, "schedules": schedules,
                 "schedule_id": row["id"], "schedule_name": row["name"],
                 "day_index": day_idx, "day_label": day_label(day_idx),
-                "rest_minutes": sched["rest_minutes"], "day": day,
+                "rest_minutes": sched["rest_minutes"],
+                "timer_enabled": sched.get("timer_enabled", True),
+                "day": day,
                 "counted_sets": counted_sets(day),
                 "last_same_day": (udb.workout_json(last_same)
                                   if last_same else None)})
@@ -779,6 +805,12 @@ class Handler(BaseHTTPRequestHandler):
                         return cast(v) if v not in (None, "") else None
                     except (TypeError, ValueError):
                         return None
+                band = clean_band(e.get("band"))
+                measure = e.get("measure")
+                if band:
+                    measure = "band"
+                elif measure not in ("weight", "band", "bodyweight"):
+                    measure = "weight"
                 clean.append({
                     "seq": i,
                     "step_index": num(e.get("step_index"), int) or 0,
@@ -791,12 +823,21 @@ class Handler(BaseHTTPRequestHandler):
                     "group_mode": (e.get("group_mode")
                                    if e.get("group_mode") in ("entire", "each")
                                    else None),
-                    "band": clean_band(e.get("band")),
-                    "weight": (None if clean_band(e.get("band"))
+                    "band": band,
+                    "measure": measure,
+                    "weight": (None if (band or measure == "bodyweight")
                                else num(e.get("weight"), float)),
                     "reps": num(e.get("reps"), int)})
+            ended_early = bool(p.get("ended_early"))
+            if ended_early and clean:
+                # Ending during the timer of the last set is not ending
+                # early: the saved entries already cover every step.
+                # (Sarah's 11/09 + 11/11 workouts were flagged this way.)
+                total_steps = counted_sets(sched["days"][day_idx])
+                if max(e["step_index"] for e in clean) >= total_steps - 1:
+                    ended_early = False
             wid = udb.insert_workout(sid, row["name"], day_idx, date_str,
-                                     bool(p.get("ended_early")),
+                                     ended_early,
                                      sched["days"][day_idx], clean)
             return self._json(200, {"ok": True, "workout_id": wid})
         return self._json(404, {"ok": False})
@@ -831,9 +872,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"ok": False,
                                         "error": "weight/reps can't be negative"})
             band = clean_band(p.get("band"))
+            measure = p.get("measure")
+            if measure not in ("weight", "band", "bodyweight"):
+                measure = None
             if band:
                 weight = None
-            entry = udb.update_workout_set(set_id, name, weight, band, reps)
+                measure = "band"
+            if measure == "bodyweight":
+                weight = None
+                band = None
+            entry = udb.update_workout_set(set_id, name, weight, band, reps,
+                                           measure)
             if entry is None:
                 return self._json(404, {"ok": False})
             return self._json(200, {"ok": True, "entry": entry})

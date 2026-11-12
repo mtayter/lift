@@ -162,7 +162,7 @@ $('nav-logout').onclick = logout;
 
 /* ---------- EDIT: schedule management ---------- */
 function defaultSchedule() {
-  return { rest_minutes: 2, days: [{ exercises: [{ id: uid(), name: '', sets: 1, group_id: null }], groups: {} }] };
+  return { rest_minutes: 2, timer_enabled: true, days: [{ exercises: [{ id: uid(), name: '', sets: 1, group_id: null }], groups: {} }] };
 }
 async function refreshScheduleList() {
   const r = await api('/schedules');
@@ -268,6 +268,7 @@ function renderEdit() {
   if (!schedule) return;
   $('link-warning').style.display = linkedEdited ? 'block' : 'none';
   $('rest-input').value = schedule.rest_minutes;
+  updateTimerUI();
   const c = $('days-container'); c.innerHTML = '';
   schedule.days.forEach((day, di) => {
     const card = document.createElement('div'); card.className = 'day-card';
@@ -427,18 +428,36 @@ $('rest-input').oninput = () => {
   schedule.rest_minutes = (v > 0 && v <= 60) ? v : schedule.rest_minutes;
   markDirty(); refreshDayTotals();
 };
+/* Timer Yes/No sits left of "Time between sets". Off hides the rest
+   input and the per-day total time (sets count stays). */
+function timerOn() { return schedule ? schedule.timer_enabled !== false : true; }
+function updateTimerUI() {
+  const on = timerOn();
+  document.querySelectorAll('#timer-seg [data-timer]').forEach(b =>
+    b.classList.toggle('on', (b.dataset.timer === 'yes') === on));
+  $('rest-controls').style.display = on ? '' : 'none';
+}
+document.querySelectorAll('#timer-seg [data-timer]').forEach(b => b.onclick = () => {
+  if (!schedule) return;
+  schedule.timer_enabled = b.dataset.timer === 'yes';
+  markDirty(); updateTimerUI(); refreshDayTotals();
+});
 function refreshDayTotals() {
   if (!schedule) return;
   schedule.days.forEach((day, di) => {
     const el = $('day-total-' + di); if (!el) return;
     const total = countedSets(day);
-    el.innerHTML = `${total} sets<br>${fmtMins(schedule.rest_minutes * total)} total`;
+    el.innerHTML = timerOn()
+      ? `${total} sets<br>${fmtMins(schedule.rest_minutes * total)} total`
+      : `${total} sets`;
   });
 }
 $('btn-save-schedule').onclick = async () => {
-  const v = parseFloat($('rest-input').value);
-  if (!(v > 0 && v <= 60)) { $('save-msg').textContent = 'Time between sets must be between 0 and 60 minutes.'; $('save-msg').className = 'err'; return; }
-  schedule.rest_minutes = v;
+  if (timerOn()) {
+    const v = parseFloat($('rest-input').value);
+    if (!(v > 0 && v <= 60)) { $('save-msg').textContent = 'Time between sets must be between 0 and 60 minutes.'; $('save-msg').className = 'err'; return; }
+    schedule.rest_minutes = v;
+  }
   scheduleName = $('schedule-name').value.trim() || 'My Schedule';
   const r = await api('/schedules/' + currentScheduleId, jsonOpts('PUT', { name: scheduleName, schedule }));
   if (r.body.ok) {
@@ -459,7 +478,7 @@ $('btn-save-schedule').onclick = async () => {
 
 /* ---------- WORKOUT ---------- */
 function freshWorkoutState() {
-  return { running: false, steps: [], flat: [], current: 0, deadline: 0, timerId: null, restSec: 120, data: null, wakeLock: null, lastMap: new Map() };
+  return { running: false, steps: [], flat: [], current: 0, deadline: 0, timerId: null, restSec: 120, timerEnabled: true, data: null, wakeLock: null, lastMap: new Map() };
 }
 let wo = freshWorkoutState();
 let woDirty = false;   // user has typed/tapped unsaved workout values
@@ -480,6 +499,7 @@ async function loadWorkout(preferredId) {
   }
   wo.data = r.body;
   wo.restSec = Math.round(r.body.rest_minutes * 60);
+  wo.timerEnabled = r.body.timer_enabled !== false;
   wo.steps = buildSteps(r.body.day);
   // last-time lookup by exercise ID + set number (link survives edits);
   // legacy entries without an ID fall back to name + set number.
@@ -509,8 +529,10 @@ async function loadWorkout(preferredId) {
   }));
   woDirty = false;
   $('workout-day-label').textContent = 'Day ' + r.body.day_label;
-  $('workout-sub').textContent = `${r.body.schedule_name} • ${wo.steps.length} sets • ${r.body.rest_minutes} min between sets`;
-  $('timer-display').textContent = fmtClock(wo.restSec);
+  $('workout-sub').textContent = wo.timerEnabled
+    ? `${r.body.schedule_name} • ${wo.steps.length} sets • ${r.body.rest_minutes} min between sets`
+    : `${r.body.schedule_name} • ${wo.steps.length} sets • no timer`;
+  $('timer-display').textContent = wo.timerEnabled ? fmtClock(wo.restSec) : '--:--';
   $('timer-fill').style.width = '0%';
   $('btn-start').disabled = false; $('btn-end-early').disabled = true;
   renderWorkoutTable();
@@ -575,16 +597,30 @@ function renderWorkoutTable() {
     inp.onblur = () => {
       // Blur with an empty box restores the light-colored last-time
       // default instead of leaving a blank that would save as blank.
-      if (inp.value.trim() !== '') return;
-      const last = inp.dataset.field === 'weight' ? flat.lastWeight : flat.lastReps;
-      if (last != null) {
-        inp.value = last;
-        flat[inp.dataset.field] = String(last);
-        inp.classList.add('inherited');
-        flat[inhKey] = true;
-      } else {
-        flat[inp.dataset.field] = '';
+      if (inp.value.trim() === '') {
+        const last = inp.dataset.field === 'weight' ? flat.lastWeight : flat.lastReps;
+        if (last != null) {
+          inp.value = last;
+          flat[inp.dataset.field] = String(last);
+          inp.classList.add('inherited');
+          flat[inhKey] = true;
+        } else {
+          flat[inp.dataset.field] = '';
+        }
       }
+      // No-timer mode: entering the reps for the current step moves the
+      // highlight on. Reps is the last field of a step, so a blur here
+      // means the step's values are in; typing (not an inherited
+      // prefill) is what counts as "entered". Inputs stay editable
+      // after the highlight moves, as in timer mode.
+      if (inp.dataset.field === 'reps' && !wo.timerEnabled && wo.running
+          && flat.step_index === wo.current && !flat.inhReps) {
+        const stepFlats = wo.flat.filter(f => f.step_index === flat.step_index);
+        if (stepFlats[stepFlats.length - 1] === flat) advanceStep();
+      }
+    };
+    inp.onkeydown = e => {
+      if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
     };
   });
   body.querySelectorAll('.band-picker').forEach(p => {
@@ -648,6 +684,13 @@ function startTimer() {
   if (navigator.wakeLock) navigator.wakeLock.request('screen').then(w => wo.wakeLock = w).catch(() => {});
   $('btn-start').disabled = true; $('btn-end-early').disabled = false;
   $('wo-schedule-picker').disabled = true;
+  if (!wo.timerEnabled) {
+    // No timer: no countdown, no beeps between sets — the highlight
+    // advances when the reps for the current step are entered (see the
+    // reps blur handler in renderWorkoutTable).
+    highlightStep();
+    return;
+  }
   wo.deadline = Date.now() + wo.restSec * 1000;
   clearInterval(wo.timerId);
   wo.timerId = setInterval(tick, 200);
@@ -675,16 +718,26 @@ $('btn-end-early').onclick = () => { if (wo.running) finishWorkout(true); };
 
 /* save prompt */
 let pendingEarly = false;
+function advanceStep() {
+  // No-timer mode only: move the highlight on, or finish the workout
+  // once the last step's values are in.
+  wo.current++;
+  if (wo.current >= wo.steps.length) { finishWorkout(false); return; }
+  highlightStep();
+}
 function finishWorkout(early) {
   stopTimer();
-  pendingEarly = early;
+  // Ending during the last set is not ending early — every step has
+  // been reached, so the workout counts as complete.
+  const effectiveEarly = early && wo.current < wo.steps.length - 1;
+  pendingEarly = effectiveEarly;
   highlightStep();
-  $('modal-title').textContent = early ? 'End workout early?' : 'Workout complete 🎉';
-  const doneEntries = collectEntries(early).length;
-  $('modal-text').textContent = early
+  $('modal-title').textContent = effectiveEarly ? 'End workout early?' : 'Workout complete 🎉';
+  const doneEntries = collectEntries(effectiveEarly).length;
+  $('modal-text').textContent = effectiveEarly
     ? `Save the ${doneEntries} set(s) done so far? This counts as today's Day ${wo.data.day_label} on "${wo.data.schedule_name}" — next time on this schedule you'll move to the next day.`
     : `Save this Day ${wo.data.day_label} workout (${wo.data.schedule_name}) to your history?`;
-  $('modal-resume').style.display = early ? 'block' : 'none';
+  $('modal-resume').style.display = effectiveEarly ? 'block' : 'none';
   $('modal-backdrop').style.display = 'flex';
 }
 function collectEntries(early) {
@@ -705,6 +758,7 @@ function collectEntries(early) {
         step_index: f.step_index, exercise_id: f.exercise_id,
         exercise_name: f.name, set_number: f.set_number,
         group_id: f.group_id, group_mode: f.group_mode,
+        measure: f.measure || 'weight',
         band,
         weight: band ? null
           : (f.weight !== '' ? Number(f.weight) : f.lastWeight),
@@ -717,6 +771,7 @@ $('modal-resume').onclick = () => {
   wo.running = true;
   $('btn-start').disabled = true; $('btn-end-early').disabled = false;
   $('wo-schedule-picker').disabled = true;
+  if (!wo.timerEnabled) { highlightStep(); return; }
   wo.deadline = Date.now() + wo.restSec * 1000;
   clearInterval(wo.timerId); wo.timerId = setInterval(tick, 200);
   highlightStep();
@@ -763,19 +818,28 @@ function renderHistory() {
     list.appendChild(card);
   }
 }
+function histValText(e) {
+  const reps = e.reps != null ? e.reps : '—';
+  if (e.measure === 'bodyweight') return `BW × ${reps}`;
+  if (e.band) return `${e.band} × ${reps}`;
+  return `${e.weight != null ? e.weight : '—'} × ${reps}`;
+}
 function histRowEl(e) {
   const row = document.createElement('div');
   row.className = 'hrow' + (editingSetId === e.id ? ' editing' : '');
   if (editingSetId !== e.id) {
     row.innerHTML = `<span class="hn">${e.seq + 1}</span><span>${esc(e.exercise_name) || '(unnamed)'}${e.group_mode ? ' <span class="ss-tag">SS</span>' : ''}</span>
-      <span class="hv">${e.band ? e.band : (e.weight != null ? e.weight : '—')} × ${e.reps != null ? e.reps : '—'}</span>`;
+      <span class="hv">${histValText(e)}</span>`;
     row.title = 'Tap to edit';
     row.onclick = () => { editingSetId = e.id; renderHistory(); };
     return row;
   }
   // editing: row becomes inputs with Save next to it — band entries get
-  // the L/M/H chip picker instead of the numeric weight box
-  const mid = e.band != null
+  // the L/M/H chip picker instead of the numeric weight box, and
+  // bodyweight entries get just a BW label (no weight box at all)
+  const mid = e.measure === 'bodyweight'
+    ? `<span class="bw-label">BW</span>`
+    : e.band != null
     ? `<div class="band-picker">${['L', 'M', 'H'].map(b =>
         `<button type="button" class="band-btn${e.band.split('+').includes(b) ? ' on' : ''}" data-b="${b}" aria-label="Band ${b}">${b}</button>`).join('')}</div>`
     : `<input class="hnum hw" type="number" inputmode="decimal" step="any" min="0" value="${e.weight != null ? e.weight : ''}" placeholder="wt" aria-label="Weight">`;
@@ -794,12 +858,18 @@ function histRowEl(e) {
       exercise_name: row.querySelector('.hname').value,
       reps: row.querySelector('.hr').value === '' ? null : Number(row.querySelector('.hr').value)
     };
-    if (picker) {
+    if (e.measure === 'bodyweight') {
+      payload.measure = 'bodyweight';
+      payload.weight = null;
+      payload.band = null;
+    } else if (picker) {
+      payload.measure = 'band';
       payload.band = ['L', 'M', 'H']
         .filter(b => picker.querySelector(`[data-b="${b}"]`).classList.contains('on'))
         .join('+') || null;
       payload.weight = null;
     } else {
+      payload.measure = 'weight';
       payload.band = null;
       payload.weight = row.querySelector('.hw').value === '' ? null : Number(row.querySelector('.hw').value);
     }
@@ -808,6 +878,7 @@ function histRowEl(e) {
       e.exercise_name = r.body.entry.exercise_name;
       e.weight = r.body.entry.weight;
       e.band = r.body.entry.band;
+      e.measure = r.body.entry.measure;
       e.reps = r.body.entry.reps;
       editingSetId = null;
       renderHistory();

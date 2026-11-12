@@ -128,6 +128,7 @@ select{background:#0f1114;color:var(--text);border:1px solid var(--line);
 .rest-row input{width:84px;background:#0f1114;color:var(--text);
   border:1px solid var(--line);border-radius:7px;padding:9px;font-family:var(--mono);
   font-size:1rem;min-height:44px}
+#rest-controls{display:inline-flex;align-items:center;gap:8px}
 .rest-row label{font-weight:700}
 #save-msg{min-height:1.3em;margin:4px 2px}
 #save-msg.ok{color:var(--good)} #save-msg.err{color:var(--bad)}

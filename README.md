@@ -12,6 +12,8 @@ against the last time you did that day.
   1 set means for it: *entire superset* (one timer step and one counted
   set per round) or *each exercise* (interleaved, a timer step and a
   counted set per exercise). Per-day total = rest minutes × counted sets.
+  Each schedule also has a Timer Yes/No switch (left of "Time between
+  sets"): No hides the rest input and the per-day total time.
 - **Multiple schedules** — each user can keep several named schedules.
   They are fully *independent*: separate day rotation, separate history.
   Edit updates a schedule in place; Copy duplicates it with fresh
@@ -28,10 +30,15 @@ against the last time you did that day.
 - **Workout** — pick a schedule (defaults to the newest); today's day
   is picked by rotating from your last saved workout *on that
   schedule*. The timer auto-advances the highlight one set per rest
-  period, beeping 3 times at zero. Left column = last time you did
+  period, beeping 3 times at zero. With the timer off, there is no
+  countdown — the highlight moves on when the reps for the current step
+  are entered. Left column = last time you did
   this day on this schedule; right column = today's weight/reps (last
-  time's values as placeholders). End Early saves what's done and
-  still advances the rotation.
+  time's values prefilled in light color and saved unless typed over).
+  End Early saves what's done and still advances the rotation — except
+  ending during the last set, which counts as a complete workout.
+  Bodyweight exercises show just BW + reps (no weight box); in History
+  they read "BW × reps".
 - **History** — every saved workout, newest first, tagged with its
   schedule's name.
 

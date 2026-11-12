@@ -226,15 +226,19 @@ try:
                  "date": "2026-11-07", "ended_early": False, "entries": [
                      {"step_index": 0, "exercise_id": ids["Band Row"],
                       "exercise_name": "Band Row", "set_number": 1,
+                      "measure": "band",
                       "band": "H+M", "weight": 999, "reps": 15},
                      {"step_index": 1, "exercise_id": ids["Band Row"],
                       "exercise_name": "Band Row", "set_number": 2,
+                      "measure": "band",
                       "band": "h", "weight": None, "reps": 12},
                      {"step_index": 2, "exercise_id": ids["Push-up"],
                       "exercise_name": "Push-up", "set_number": 1,
+                      "measure": "bodyweight",
                       "band": None, "weight": None, "reps": 20},
                      {"step_index": 3, "exercise_id": ids["Curl"],
                       "exercise_name": "Curl", "set_number": 1,
+                      "measure": "weight",
                       "band": "X", "weight": 20, "reps": 10}]}, H)
     check("band workout saved", b.get("ok"), str(b)[:120])
     s, b = call("GET", f"/api/workout/today?schedule_id={band_sid}",
@@ -245,15 +249,86 @@ try:
     check("band case-normalized", ent[1]["band"] == "H")
     check("bodyweight entry has no weight/band",
           ent[2]["weight"] is None and ent[2]["band"] is None)
-    check("invalid band cleared, weight kept",
-          ent[3]["band"] is None and ent[3]["weight"] == 20)
+    check("measure stored on sets (band/bodyweight/weight)",
+          [e.get("measure") for e in ent]
+          == ["band", "band", "bodyweight", "weight"], str(ent))
     s, b = call("PUT", f"/api/workout-sets/{ent[0]['id']}",
                 {"exercise_name": "Band Row", "weight": None, "band": "L",
                  "reps": 15}, H)
     check("history edit band", b.get("ok") and b["entry"]["band"] == "L"
           and b["entry"]["weight"] is None, str(b)[:140])
+    s, b = call("PUT", f"/api/workout-sets/{ent[2]['id']}",
+                {"exercise_name": "Push-up", "weight": None, "band": None,
+                 "measure": "bodyweight", "reps": 22}, H)
+    check("history edit bodyweight keeps measure, no weight",
+          b.get("ok") and b["entry"]["measure"] == "bodyweight"
+          and b["entry"]["weight"] is None
+          and b["entry"]["reps"] == 22, str(b)[:140])
     s, b = call("DELETE", f"/api/schedules/{band_sid}", headers=H)
     check("band test schedule deleted", b.get("ok"))
+
+    # --- v2.7: Timer Yes/No per schedule ---
+    s, b = call("POST", "/api/schedules",
+                {"name": "NoTimer", "schedule": {
+                    "rest_minutes": 0, "timer_enabled": False, "days": [
+                        {"exercises": [
+                            {"name": "Squat", "sets": 2}], "groups": {}}]}},
+                H)
+    check("timer-off schedule saves with rest 0 (no rest validation)",
+          s == 200 and b.get("ok"), str(b)[:120])
+    nt_id = b["id"]
+    check("timer flag stored false",
+          b["schedule"].get("timer_enabled") is False, str(b)[:120])
+    s, b = call("POST", "/api/schedules",
+                {"name": "BadRest", "schedule": {
+                    "rest_minutes": 0, "timer_enabled": True, "days": [
+                        {"exercises": [
+                            {"name": "Squat", "sets": 2}], "groups": {}}]}},
+                H)
+    check("timer-on schedule still rejects rest 0", s == 400)
+    s, b = call("GET", f"/api/workout/today?schedule_id={nt_id}", headers=H)
+    check("today reports timer_enabled false",
+          b.get("timer_enabled") is False, str(b)[:120])
+    s, b = call("GET", f"/api/workout/today?schedule_id={main_id}", headers=H)
+    check("schedule without timer flag defaults timer on",
+          b.get("timer_enabled") is True, str(b)[:120])
+    s, b = call("DELETE", f"/api/schedules/{nt_id}", headers=H)
+    check("no-timer test schedule deleted", b.get("ok"))
+
+    # --- v2.7: End Early on the last step is not early ---
+    s, b = call("POST", "/api/schedules",
+                {"name": "EarlyTest", "schedule": {
+                    "rest_minutes": 2, "days": [{"exercises": [
+                        {"name": "A", "sets": 1},
+                        {"name": "B", "sets": 1},
+                        {"name": "C", "sets": 1}], "groups": {}}]}}, H)
+    et_id = b["id"]
+    et_ids = {e["name"]: e["id"]
+              for e in b["schedule"]["days"][0]["exercises"]}
+    full = [{"step_index": i, "exercise_id": et_ids[n],
+             "exercise_name": n, "set_number": 1, "measure": "weight",
+             "weight": 50 + i, "reps": 10}
+            for i, n in enumerate(["A", "B", "C"])]
+    s, b = call("POST", "/api/workouts",
+                {"schedule_id": et_id, "day_index": 0, "date": "2026-11-09",
+                 "ended_early": True, "entries": full}, H)
+    check("full-coverage save with ended_early true accepted", b.get("ok"))
+    s, b = call("GET", "/api/history", headers=H)
+    w_full = [w for w in b["workouts"]
+              if w["schedule_name"] == "EarlyTest"][0]
+    check("ended during last step is NOT flagged ended early",
+          w_full["ended_early"] is False, str(w_full["ended_early"]))
+    s, b = call("POST", "/api/workouts",
+                {"schedule_id": et_id, "day_index": 0, "date": "2026-11-10",
+                 "ended_early": True, "entries": full[:1]}, H)
+    check("partial save with ended_early true accepted", b.get("ok"))
+    s, b = call("GET", "/api/history", headers=H)
+    w_part = [w for w in b["workouts"]
+              if w["schedule_name"] == "EarlyTest"][0]
+    check("genuinely partial save stays flagged ended early",
+          w_part["ended_early"] is True, str(w_part["ended_early"]))
+    s, b = call("DELETE", f"/api/schedules/{et_id}", headers=H)
+    check("early-test schedule deleted", b.get("ok"))
 
     # --- delete rules ---
     s, b = call("DELETE", f"/api/schedules/{copy_id}", headers=H)
@@ -322,6 +397,8 @@ try:
     s, b = call("GET", "/api/workout/today", headers=H)
     check("migration: today works, exercise got an ID assigned",
           b["schedule_id"] == mig_id and b["day"]["exercises"][0].get("id"))
+    check("migration: pre-timer schedule defaults timer on",
+          b.get("timer_enabled") is True, str(b.get("timer_enabled")))
 finally:
     proc.terminate()
 
