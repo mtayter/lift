@@ -64,6 +64,10 @@ check("Handler uses no raw db.* calls (UserDB only)",
       "")
 check("UserDB wrapper exists and is uid-bound",
       "class UserDB" in _src and "def __init__(self, uid)" in _src)
+_app_js = open(os.path.join(ROOT, "static", "app.js")).read()
+check("beforeunload warns while a workout runs or save prompt is open",
+      "addEventListener('beforeunload'" in _app_js
+      and "e.returnValue" in _app_js)
 
 # ============ part 1: fresh v2 flow ============
 def version_checks():

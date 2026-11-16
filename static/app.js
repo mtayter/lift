@@ -785,6 +785,21 @@ $('modal-save').onclick = async () => {
   else { toast('Save failed — please try again'); loadWorkout(wo.data.schedule_id); }
 };
 
+/* ---------- leave warning ----------
+   A workout lives only in memory until it is saved: navigating away,
+   reloading, or closing the tab mid-workout loses the typed values
+   (Sarah lost rows this way on 2026-11-16). Warn first while a workout
+   is running or its save prompt is open. The browser shows its own
+   generic message; setting returnValue is what triggers it. The
+   auto-update reload only fires when it is safe (not running, no
+   modal), so it never trips this. */
+window.addEventListener('beforeunload', e => {
+  if (wo.running || $('modal-backdrop').style.display === 'flex') {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
 /* ---------- HISTORY ---------- */
 let histWorkouts = [];
 let editingSetId = null;   // workout_sets.id currently being edited, if any

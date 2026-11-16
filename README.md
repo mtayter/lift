@@ -38,7 +38,8 @@ against the last time you did that day.
   End Early saves what's done and still advances the rotation — except
   ending during the last set, which counts as a complete workout.
   Bodyweight exercises show just BW + reps (no weight box); in History
-  they read "BW × reps".
+  they read "BW × reps". Leaving the page mid-workout (reload, back,
+  tab close) asks first, since an unsaved workout lives only in memory.
 - **History** — every saved workout, newest first, tagged with its
   schedule's name.
 
