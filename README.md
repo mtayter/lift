@@ -40,6 +40,13 @@ against the last time you did that day.
   Bodyweight exercises show just BW + reps (no weight box); in History
   they read "BW × reps". Leaving the page mid-workout (reload, back,
   tab close) asks first, since an unsaved workout lives only in memory.
+  Since v2.9 the in-progress workout is also snapshotted to the
+  phone's local storage on every change and when the page hides, and
+  restored on load — so a tab killed in the background (switching apps
+  on Android, where no warning can fire) comes back at the same step
+  with the same values, timer paused; Start resumes the countdown.
+  The snapshot is keyed by user + schedule + day + date, so a stale
+  one is ignored, and it clears on Save, Discard, or logout.
 - **History** — every saved workout, newest first, tagged with its
   schedule's name.
 

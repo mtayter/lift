@@ -126,7 +126,7 @@ function enterApp(data) {
   showView(hasSchedule ? 'workout' : 'edit');
 }
 async function logout() {
-  stopTimer();
+  stopTimer(); woSnapOff = true; clearWoSnap();
   await api('/logout', { method: 'POST' });
   location.reload();
 }
@@ -141,7 +141,7 @@ async function showView(v) {
   if (v !== currentView) {
     if (wo.running) {
       if (!confirm('A workout timer is running. Leave and discard this workout?')) return;
-      stopTimer(); wo = freshWorkoutState();
+      stopTimer(); wo = freshWorkoutState(); clearWoSnap();
     }
     if (currentView === 'edit' && editDirty) {
       if (!confirm('You have unsaved schedule changes. Discard them?')) return;
@@ -478,10 +478,48 @@ $('btn-save-schedule').onclick = async () => {
 
 /* ---------- WORKOUT ---------- */
 function freshWorkoutState() {
-  return { running: false, steps: [], flat: [], current: 0, deadline: 0, timerId: null, restSec: 120, timerEnabled: true, data: null, wakeLock: null, lastMap: new Map() };
+  return { running: false, steps: [], flat: [], current: 0, deadline: 0, timerId: null, restSec: 120, timerEnabled: true, data: null, wakeLock: null, lastMap: new Map(), restored: false };
 }
 let wo = freshWorkoutState();
 let woDirty = false;   // user has typed/tapped unsaved workout values
+
+/* ---------- auto-resume (v2.9) ----------
+   An in-progress workout lives only in memory until it is saved, so a
+   tab killed in the background used to lose every typed value: on
+   Android, switching apps can get Chrome to discard the tab, and
+   beforeunload never fires for a discard (Sarah lost rows this way
+   2026-11-16 and 2026-11-20). The fix: snapshot the workout to
+   localStorage on every change and when the page hides, and restore
+   it when the page loads again. The snapshot is keyed by user +
+   schedule + day + date, so a stale one (another day, another
+   schedule, another user) is ignored and deleted, never resurrected.
+   The timer is NOT resumed automatically — after a restore it stays
+   paused and Start resumes the countdown for the step she was on.
+   Cleared on Save, Discard, logout, and when she confirms discarding
+   the workout by leaving the view. */
+const WO_SNAP_KEY = 'liftWoSnap';
+let woSnapOff = false;   // set on logout so the reload doesn't re-snapshot
+function snapWorkout(pendingSave) {
+  if (woSnapOff || !wo.data || !wo.flat.length) return;
+  try {
+    localStorage.setItem(WO_SNAP_KEY, JSON.stringify({
+      v: 1, email: user ? user.email : null,
+      scheduleId: wo.data.schedule_id, dayIndex: wo.data.day_index,
+      date: todayYMD(), current: wo.current,
+      pendingSave: !!pendingSave, pendingEarly: pendingEarly,
+      entries: wo.flat.map(f => ({ seq: f.seq, weight: f.weight,
+        reps: f.reps, band: f.band, inhWeight: f.inhWeight,
+        inhReps: f.inhReps, inhBand: f.inhBand }))
+    }));
+  } catch (e) { /* storage unavailable — workout still works, just no resume */ }
+}
+function clearWoSnap() { try { localStorage.removeItem(WO_SNAP_KEY); } catch (e) {} }
+function readWoSnap() {
+  try {
+    const s = JSON.parse(localStorage.getItem(WO_SNAP_KEY) || 'null');
+    return s && s.v === 1 ? s : null;
+  } catch (e) { return null; }
+}
 
 async function loadWorkout(preferredId) {
   stopTimer();
@@ -528,6 +566,34 @@ async function loadWorkout(preferredId) {
     wo.flat.push(f);
   }));
   woDirty = false;
+  // Auto-resume: if this browser holds an in-progress snapshot for
+  // today's schedule and day, restore the entered values and the step
+  // she was on instead of starting fresh. A snapshot from another
+  // day, schedule, or user is stale — delete it, never restore it.
+  let snapPending = false, snapPendingEarly = false;
+  const snap = readWoSnap();
+  if (snap && user && snap.email === user.email
+      && snap.scheduleId === r.body.schedule_id
+      && snap.dayIndex === r.body.day_index && snap.date === todayYMD()
+      && Array.isArray(snap.entries) && snap.entries.length === wo.flat.length
+      && snap.entries.every((se, i) => se.seq === wo.flat[i].seq)) {
+    snap.entries.forEach((se, i) => {
+      const f = wo.flat[i];
+      f.weight = se.weight; f.reps = se.reps; f.band = se.band;
+      f.inhWeight = !!se.inhWeight; f.inhReps = !!se.inhReps; f.inhBand = !!se.inhBand;
+    });
+    wo.current = Math.min(Math.max(0, snap.current || 0), wo.steps.length - 1);
+    wo.restored = true;
+    // Typed (non-inherited, non-empty) values are unsaved work, so the
+    // auto-update reload stays blocked while they are on screen.
+    woDirty = snap.entries.some(se =>
+      (se.weight !== '' && !se.inhWeight) || (se.reps !== '' && !se.inhReps) ||
+      (se.band !== '' && !se.inhBand));
+    snapPending = !!snap.pendingSave;
+    snapPendingEarly = !!snap.pendingEarly;
+  } else if (snap) {
+    clearWoSnap();
+  }
   $('workout-day-label').textContent = 'Day ' + r.body.day_label;
   $('workout-sub').textContent = wo.timerEnabled
     ? `${r.body.schedule_name} • ${wo.steps.length} sets • ${r.body.rest_minutes} min between sets`
@@ -536,6 +602,12 @@ async function loadWorkout(preferredId) {
   $('timer-fill').style.width = '0%';
   $('btn-start').disabled = false; $('btn-end-early').disabled = true;
   renderWorkoutTable();
+  if (wo.restored) {
+    toast('Workout restored — pick up where you left off');
+    // She was at the save prompt when the page died: the entries are
+    // back, so bring the prompt back too.
+    if (snapPending) finishWorkout(snapPendingEarly);
+  }
 }
 $('wo-schedule-picker').onchange = e => {
   const id = Number(e.target.value);
@@ -543,6 +615,7 @@ $('wo-schedule-picker').onchange = e => {
   if (wo.running && !confirm('A workout timer is running. Switch schedules and discard this workout?')) {
     e.target.value = wo.data.schedule_id; return;
   }
+  clearWoSnap();
   loadWorkout(id);
 };
 function lastEntryFor(flat) {
@@ -593,6 +666,7 @@ function renderWorkoutTable() {
         flat[inhKey] = false;
         woDirty = true;
       }
+      snapWorkout(false);
     };
     inp.onblur = () => {
       // Blur with an empty box restores the light-colored last-time
@@ -618,6 +692,7 @@ function renderWorkoutTable() {
         const stepFlats = wo.flat.filter(f => f.step_index === flat.step_index);
         if (stepFlats[stepFlats.length - 1] === flat) advanceStep();
       }
+      snapWorkout(false);
     };
     inp.onkeydown = e => {
       if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
@@ -637,6 +712,7 @@ function renderWorkoutTable() {
           .filter(b => p.querySelector(`[data-b="${b}"]`).classList.contains('on'))
           .join('+');
         woDirty = true;
+        snapWorkout(false);
       };
     });
   });
@@ -651,11 +727,12 @@ function valText(le, measure) {
 function highlightStep() {
   wo.steps.forEach((_, si) => {
     const el = $('step-' + si); if (!el) return;
-    el.classList.toggle('current', wo.running && si === wo.current);
+    // A restored workout shows its saved step even before Start.
+    el.classList.toggle('current', (wo.running || wo.restored) && si === wo.current);
     el.classList.toggle('done', si < wo.current);
   });
   const cur = $('step-' + wo.current);
-  if (wo.running && cur) cur.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  if ((wo.running || wo.restored) && cur) cur.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 /* timer */
@@ -678,7 +755,8 @@ function beep3() {
 }
 function startTimer() {
   if (!wo.steps.length) return;
-  wo.running = true; wo.current = 0;
+  // After a restore, Start resumes from the saved step, not step 0.
+  wo.running = true; wo.current = wo.restored ? wo.current : 0; wo.restored = false;
   try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch (e) {}
   beep3();   // audible "go" when the workout starts (Mike, 2026-11-11)
   if (navigator.wakeLock) navigator.wakeLock.request('screen').then(w => wo.wakeLock = w).catch(() => {});
@@ -689,12 +767,14 @@ function startTimer() {
     // advances when the reps for the current step are entered (see the
     // reps blur handler in renderWorkoutTable).
     highlightStep();
+    snapWorkout(false);
     return;
   }
   wo.deadline = Date.now() + wo.restSec * 1000;
   clearInterval(wo.timerId);
   wo.timerId = setInterval(tick, 200);
   highlightStep(); tick();
+  snapWorkout(false);
 }
 function tick() {
   const left = (wo.deadline - Date.now()) / 1000;
@@ -706,6 +786,7 @@ function tick() {
   if (wo.current >= wo.steps.length) { finishWorkout(false); return; }
   wo.deadline = Date.now() + wo.restSec * 1000;
   highlightStep();
+  snapWorkout(false);
 }
 function stopTimer() {
   if (wo.timerId) clearInterval(wo.timerId);
@@ -724,6 +805,7 @@ function advanceStep() {
   wo.current++;
   if (wo.current >= wo.steps.length) { finishWorkout(false); return; }
   highlightStep();
+  snapWorkout(false);
 }
 function finishWorkout(early) {
   stopTimer();
@@ -739,6 +821,9 @@ function finishWorkout(early) {
     : `Save this Day ${wo.data.day_label} workout (${wo.data.schedule_name}) to your history?`;
   $('modal-resume').style.display = effectiveEarly ? 'block' : 'none';
   $('modal-backdrop').style.display = 'flex';
+  // Record that the save prompt is open, so a reload brings it back
+  // with the entries instead of losing the finished workout.
+  snapWorkout(true);
 }
 function collectEntries(early) {
   // "filled" for the in-progress step means the user actually typed or
@@ -771,29 +856,37 @@ $('modal-resume').onclick = () => {
   wo.running = true;
   $('btn-start').disabled = true; $('btn-end-early').disabled = false;
   $('wo-schedule-picker').disabled = true;
-  if (!wo.timerEnabled) { highlightStep(); return; }
+  if (!wo.timerEnabled) { highlightStep(); snapWorkout(false); return; }
   wo.deadline = Date.now() + wo.restSec * 1000;
   clearInterval(wo.timerId); wo.timerId = setInterval(tick, 200);
   highlightStep();
+  snapWorkout(false);
 };
-$('modal-discard').onclick = () => { $('modal-backdrop').style.display = 'none'; loadWorkout(wo.data ? wo.data.schedule_id : undefined); };
+$('modal-discard').onclick = () => { $('modal-backdrop').style.display = 'none'; clearWoSnap(); loadWorkout(wo.data ? wo.data.schedule_id : undefined); };
 $('modal-save').onclick = async () => {
   const payload = { schedule_id: wo.data.schedule_id, day_index: wo.data.day_index, date: todayYMD(), ended_early: pendingEarly, entries: collectEntries(pendingEarly) };
   const r = await api('/workouts', jsonOpts('POST', payload));
   $('modal-backdrop').style.display = 'none';
-  if (r.body.ok) { woDirty = false; toast('Workout saved ✓'); showView('history'); }
+  if (r.body.ok) { woDirty = false; clearWoSnap(); toast('Workout saved ✓'); showView('history'); }
   else { toast('Save failed — please try again'); loadWorkout(wo.data.schedule_id); }
 };
 
-/* ---------- leave warning ----------
+/* ---------- leave warning + auto-resume snapshot ----------
    A workout lives only in memory until it is saved: navigating away,
-   reloading, or closing the tab mid-workout loses the typed values
-   (Sarah lost rows this way on 2026-11-16). Warn first while a workout
-   is running or its save prompt is open. The browser shows its own
-   generic message; setting returnValue is what triggers it. The
-   auto-update reload only fires when it is safe (not running, no
-   modal), so it never trips this. */
+   reloading, or closing the tab mid-workout used to lose the typed
+   values (Sarah lost rows this way on 2026-11-16). Warn first while
+   a workout is running or its save prompt is open. The browser shows
+   its own generic message; setting returnValue is what triggers it.
+   The auto-update reload only fires when it is safe (not running, no
+   modal), so it never trips this. Since v2.9 the values are ALSO
+   snapshotted to localStorage (see snapWorkout): the warning covers
+   real unloads, the snapshot covers the cases no warning can reach —
+   a tab frozen or discarded in the background, e.g. switching apps
+   on Android, where beforeunload never fires. */
 window.addEventListener('beforeunload', e => {
+  // Snapshot first: the warning below guards a real unload, but the
+  // snapshot saves the values either way.
+  snapWorkout($('modal-backdrop').style.display === 'flex');
   if (wo.running || $('modal-backdrop').style.display === 'flex') {
     e.preventDefault();
     e.returnValue = '';
@@ -938,8 +1031,14 @@ async function checkForUpdate(first) {
 checkForUpdate(true);
 setInterval(() => checkForUpdate(false), 60000);
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) checkForUpdate(false);
+  // Hidden is the moment a backgrounded tab is about to be frozen or
+  // discarded (app switch on Android) — snapshot now, while the page
+  // can still run code. Visible again is the update check.
+  if (document.hidden) snapWorkout($('modal-backdrop').style.display === 'flex');
+  else checkForUpdate(false);
 });
+window.addEventListener('pagehide', () =>
+  snapWorkout($('modal-backdrop').style.display === 'flex'));
 
 /* ---------- boot ---------- */
 initAuth();

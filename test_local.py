@@ -68,6 +68,25 @@ _app_js = open(os.path.join(ROOT, "static", "app.js")).read()
 check("beforeunload warns while a workout runs or save prompt is open",
       "addEventListener('beforeunload'" in _app_js
       and "e.returnValue" in _app_js)
+check("auto-resume: snapshot written to localStorage on change",
+      "localStorage.setItem(WO_SNAP_KEY" in _app_js
+      and "snapWorkout(false)" in _app_js)
+check("auto-resume: restore in loadWorkout checks user/schedule/day/date",
+      all(t in _app_js for t in
+          ("readWoSnap()", "snap.scheduleId", "snap.dayIndex",
+           "snap.date === todayYMD()", "snap.email === user.email")))
+check("auto-resume: stale snapshot deleted, never restored",
+      _app_js.count("clearWoSnap()") >= 4 and "else if (snap)" in _app_js)
+check("auto-resume: snapshot cleared on save and discard",
+      "clearWoSnap(); toast('Workout saved" in _app_js
+      and "clearWoSnap(); loadWorkout" in _app_js)
+check("auto-resume: snapshot on hide for tab discard",
+      "addEventListener('pagehide'" in _app_js
+      and "document.hidden" in _app_js)
+check("auto-resume: Start resumes from the saved step",
+      "wo.restored ? wo.current : 0" in _app_js)
+check("auto-resume: save prompt snapshot re-shown on restore",
+      "snapPending" in _app_js and "finishWorkout(snapPendingEarly)" in _app_js)
 
 # ============ part 1: fresh v2 flow ============
 def version_checks():
