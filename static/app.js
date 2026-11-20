@@ -478,7 +478,7 @@ $('btn-save-schedule').onclick = async () => {
 
 /* ---------- WORKOUT ---------- */
 function freshWorkoutState() {
-  return { running: false, steps: [], flat: [], current: 0, deadline: 0, timerId: null, restSec: 120, timerEnabled: true, data: null, wakeLock: null, lastMap: new Map(), restored: false };
+  return { running: false, steps: [], flat: [], current: 0, deadline: 0, timerId: null, restSec: 120, timerEnabled: true, data: null, wakeLock: null, lastMap: new Map(), restored: false, resumeRemaining: null };
 }
 let wo = freshWorkoutState();
 let woDirty = false;   // user has typed/tapped unsaved workout values
@@ -494,9 +494,11 @@ let woDirty = false;   // user has typed/tapped unsaved workout values
    schedule + day + date, so a stale one (another day, another
    schedule, another user) is ignored and deleted, never resurrected.
    The timer is NOT resumed automatically — after a restore it stays
-   paused and Start resumes the countdown for the step she was on.
-   Cleared on Save, Discard, logout, and when she confirms discarding
-   the workout by leaving the view. */
+   paused and Start counts down from the time that was left when the
+   page died (v2.10 stores the countdown deadline in the snapshot; if
+   it had already expired while she was away, Start gives a fresh
+   full rest instead). Cleared on Save, Discard, logout, and when
+   she confirms discarding the workout by leaving the view. */
 const WO_SNAP_KEY = 'liftWoSnap';
 let woSnapOff = false;   // set on logout so the reload doesn't re-snapshot
 function snapWorkout(pendingSave) {
@@ -507,6 +509,10 @@ function snapWorkout(pendingSave) {
       scheduleId: wo.data.schedule_id, dayIndex: wo.data.day_index,
       date: todayYMD(), current: wo.current,
       pendingSave: !!pendingSave, pendingEarly: pendingEarly,
+      // The countdown deadline, when the timer is running — so a
+      // restore can pick up the time left instead of a fresh rest.
+      // Null when the timer isn't running (incl. at the save prompt).
+      deadline: wo.running ? wo.deadline : null,
       entries: wo.flat.map(f => ({ seq: f.seq, weight: f.weight,
         reps: f.reps, band: f.band, inhWeight: f.inhWeight,
         inhReps: f.inhReps, inhBand: f.inhBand }))
@@ -584,6 +590,13 @@ async function loadWorkout(preferredId) {
     });
     wo.current = Math.min(Math.max(0, snap.current || 0), wo.steps.length - 1);
     wo.restored = true;
+    // Timer (v2.10): if the countdown deadline is still in the future,
+    // freeze the time left — Start will count down from it. If it
+    // expired while she was away, resumeRemaining stays null and
+    // Start gives a fresh full rest instead.
+    if (wo.timerEnabled && snap.deadline && snap.deadline > Date.now()) {
+      wo.resumeRemaining = (snap.deadline - Date.now()) / 1000;
+    }
     // Typed (non-inherited, non-empty) values are unsaved work, so the
     // auto-update reload stays blocked while they are on screen.
     woDirty = snap.entries.some(se =>
@@ -603,7 +616,15 @@ async function loadWorkout(preferredId) {
   $('btn-start').disabled = false; $('btn-end-early').disabled = true;
   renderWorkoutTable();
   if (wo.restored) {
-    toast('Workout restored — pick up where you left off');
+    // Show the time left on the restored page, so she sees it before
+    // tapping Start.
+    if (wo.resumeRemaining) {
+      $('timer-display').textContent = fmtClock(wo.resumeRemaining);
+      $('timer-fill').style.width = `${Math.min(100, Math.max(0, (1 - wo.resumeRemaining / wo.restSec) * 100))}%`;
+    }
+    toast(wo.resumeRemaining
+      ? `Workout restored — ${fmtClock(wo.resumeRemaining)} left on the timer`
+      : 'Workout restored — pick up where you left off');
     // She was at the save prompt when the page died: the entries are
     // back, so bring the prompt back too.
     if (snapPending) finishWorkout(snapPendingEarly);
@@ -766,11 +787,15 @@ function startTimer() {
     // No timer: no countdown, no beeps between sets — the highlight
     // advances when the reps for the current step are entered (see the
     // reps blur handler in renderWorkoutTable).
+    wo.resumeRemaining = null;
     highlightStep();
     snapWorkout(false);
     return;
   }
-  wo.deadline = Date.now() + wo.restSec * 1000;
+  // After a restore, count down from the time that was left when the
+  // page died (if any); otherwise a fresh full rest.
+  wo.deadline = Date.now() + (wo.resumeRemaining || wo.restSec) * 1000;
+  wo.resumeRemaining = null;
   clearInterval(wo.timerId);
   wo.timerId = setInterval(tick, 200);
   highlightStep(); tick();

@@ -45,8 +45,12 @@ against the last time you did that day.
   restored on load — so a tab killed in the background (switching apps
   on Android, where no warning can fire) comes back at the same step
   with the same values, timer paused; Start resumes the countdown.
-  The snapshot is keyed by user + schedule + day + date, so a stale
-  one is ignored, and it clears on Save, Discard, or logout.
+  Since v2.10 the snapshot also stores the countdown's wall-clock
+  deadline, so Start counts down from the time that was left when the
+  page died — or a fresh full rest, if the rest had already expired
+  while she was away. The snapshot is keyed by user + schedule + day
+  + date, so a stale one is ignored, and it clears on Save, Discard,
+  or logout.
 - **History** — every saved workout, newest first, tagged with its
   schedule's name.
 

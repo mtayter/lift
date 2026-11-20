@@ -87,6 +87,16 @@ check("auto-resume: Start resumes from the saved step",
       "wo.restored ? wo.current : 0" in _app_js)
 check("auto-resume: save prompt snapshot re-shown on restore",
       "snapPending" in _app_js and "finishWorkout(snapPendingEarly)" in _app_js)
+check("timer resume: snapshot stores the running countdown deadline",
+      "deadline: wo.running ? wo.deadline : null" in _app_js)
+check("timer resume: restore keeps time left when deadline is in the future",
+      "snap.deadline > Date.now()" in _app_js
+      and "wo.resumeRemaining = (snap.deadline - Date.now()) / 1000" in _app_js)
+check("timer resume: Start counts down from the time left, else a fresh rest",
+      "(wo.resumeRemaining || wo.restSec)" in _app_js
+      and "wo.resumeRemaining = null" in _app_js)
+check("timer resume: restored page shows the time left",
+      "fmtClock(wo.resumeRemaining)" in _app_js)
 
 # ============ part 1: fresh v2 flow ============
 def version_checks():
