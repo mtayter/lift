@@ -29,6 +29,7 @@
       <button class="navbtn" id="nav-workout">Workout</button>
       <button class="navbtn" id="nav-edit">Edit</button>
       <button class="navbtn" id="nav-history">History</button>
+      <button class="navbtn" id="nav-progression">Progression</button>
       <button class="navbtn" id="nav-logout">Logout</button>
     </nav>
     <div class="userchip">
@@ -97,6 +98,16 @@
     <h2>History</h2>
     <p class="muted">Tap any set row to edit it, or + Add set to add a missing one.</p>
     <div id="history-list"></div>
+  </section>
+
+  <!-- ===== PROGRESSION ===== -->
+  <section class="view" id="view-progression" style="display:none">
+    <h2>Progression</h2>
+    <div class="sched-picker-row">
+      <label for="prog-schedule-picker">Schedule</label>
+      <select id="prog-schedule-picker"></select>
+    </div>
+    <div class="prog-wrap"><div id="prog-table"></div></div>
   </section>
 </div>
 

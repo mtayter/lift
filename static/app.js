@@ -25,6 +25,13 @@ function fmtDate(ymd) {
   return new Date(y, m - 1, d).toLocaleDateString(undefined,
     { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 }
+function fmtShortDate(ymd) {
+  // Compact cell date for the Progression table: "Nov 16".
+  if (!ymd) return '';
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined,
+    { month: 'short', day: 'numeric' });
+}
 function todayYMD() {
   const n = new Date();
   const p = v => String(v).padStart(2, '0');
@@ -133,7 +140,7 @@ async function logout() {
 
 /* ---------- navigation ---------- */
 function updateNav() {
-  for (const v of ['workout', 'edit', 'history'])
+  for (const v of ['workout', 'edit', 'history', 'progression'])
     $('nav-' + v).classList.toggle('active', currentView === v);
   $('nav-workout').classList.toggle('disabled', !hasSchedule);
 }
@@ -149,15 +156,17 @@ async function showView(v) {
     }
   }
   currentView = v; updateNav();
-  for (const name of ['workout', 'edit', 'history'])
+  for (const name of ['workout', 'edit', 'history', 'progression'])
     $('view-' + name).style.display = name === v ? 'block' : 'none';
   if (v === 'workout') loadWorkout();
   if (v === 'edit') loadEdit();
   if (v === 'history') loadHistory();
+  if (v === 'progression') loadProgression();
 }
 $('nav-workout').onclick = () => { if (!hasSchedule) { toast('Save a schedule in Edit first'); showView('edit'); } else showView('workout'); };
 $('nav-edit').onclick = () => showView('edit');
 $('nav-history').onclick = () => showView('history');
+$('nav-progression').onclick = () => showView('progression');
 $('nav-logout').onclick = logout;
 
 /* ---------- EDIT: schedule management ---------- */
@@ -1115,6 +1124,97 @@ function histAddFormEl(w) {
     }
   };
   return form;
+}
+
+/* ---------- PROGRESSION ---------- */
+let progScheduleId = null;   // schedule shown in the Progression tab
+
+async function loadProgression() {
+  await refreshScheduleList();
+  const box = $('prog-table');
+  if (!schedulesMeta.length) {
+    $('prog-schedule-picker').innerHTML = '';
+    box.innerHTML = '<p class="muted">No schedules yet.</p>';
+    return;
+  }
+  const target = schedulesMeta.some(s => s.id === progScheduleId)
+    ? progScheduleId : schedulesMeta[0].id;   // newest first
+  progScheduleId = target;
+  fillPicker($('prog-schedule-picker'), schedulesMeta, target);
+  renderProgression();
+}
+$('prog-schedule-picker').onchange = e => {
+  progScheduleId = Number(e.target.value);
+  renderProgression();
+};
+
+async function renderProgression() {
+  const box = $('prog-table');
+  const schedMeta = schedulesMeta.find(s => s.id === progScheduleId);
+  if (!schedMeta) { box.innerHTML = ''; return; }
+  // The schedule's days (row order) + its workouts, oldest first so
+  // progression reads left to right. Both endpoints already exist.
+  const [schedR, histR] = await Promise.all([
+    api('/schedules/' + schedMeta.id), api('/history')]);
+  if (!schedR.body.ok) { box.innerHTML = ''; return; }
+  const sched = schedR.body.schedule || { days: [] };
+  const ws = (histR.body.workouts || [])
+    .filter(w => w.schedule_id === schedMeta.id)
+    .sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id);
+  if (!ws.length) {
+    box.innerHTML = '<p class="muted">No workouts logged for this schedule yet.</p>';
+    return;
+  }
+  // One row per exercise: the schedule's days first, in order, then
+  // any exercise that appears in this schedule's history but has
+  // since been removed from the schedule (e.g. Kneeling Ab Wheel),
+  // so its progression doesn't vanish with the edit.
+  const rows = [];
+  const seen = new Map();   // exercise id (or name) -> row
+  const addRow = (dayIndex, exId, name) => {
+    const key = exId || ('name:' + name);
+    if (seen.has(key)) return seen.get(key);
+    const row = { dayIndex, exId, name: name || '', cells: new Map() };
+    seen.set(key, row); rows.push(row);
+    return row;
+  };
+  (sched.days || []).forEach((day, di) => {
+    for (const ex of day.exercises || []) addRow(di, ex.id, ex.name);
+  });
+  for (const w of ws)
+    for (const e of w.entries) addRow(w.day_index, e.exercise_id, e.exercise_name);
+  for (const w of ws) {
+    for (const e of w.entries) {
+      const row = seen.get(e.exercise_id || ('name:' + e.exercise_name));
+      if (!row) continue;
+      if (!row.cells.has(w.id)) row.cells.set(w.id, []);
+      row.cells.get(w.id).push(e);
+    }
+  }
+  const t = document.createElement('table');
+  t.className = 'prog';
+  const head = document.createElement('thead');
+  head.innerHTML = `<tr><th>Workout</th><th>Day</th><th>Exercise</th><th colspan="${ws.length}">Progression</th></tr>`;
+  t.appendChild(head);
+  const body = document.createElement('tbody');
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(schedMeta.name)}</td><td>${dayLabel(row.dayIndex)}</td><td>${esc(row.name) || '(unnamed)'}</td>`;
+    for (const w of ws) {
+      const td = document.createElement('td');
+      const sets = row.cells.get(w.id);
+      if (sets && sets.length) {
+        sets.sort((a, b) => (a.set_number || 0) - (b.set_number || 0));
+        td.innerHTML = `<span class="prog-date">${fmtShortDate(w.date)}</span>` +
+          sets.map(e => `<br>${histValText(e)}`).join('');
+      }
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+  t.appendChild(body);
+  box.innerHTML = '';
+  box.appendChild(t);
 }
 
 /* ---------- auto-update ----------

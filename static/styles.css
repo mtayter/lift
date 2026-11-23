@@ -206,6 +206,15 @@ select{background:#0f1114;color:var(--text);border:1px solid var(--line);
 .hrow.editing .hmid{display:flex;gap:10px;align-items:center}
 .hrow.editing input.hset{width:56px;flex:none}
 
+/* progression */
+.prog-wrap{overflow-x:auto;margin-top:10px}
+table.prog{border-collapse:collapse;font-size:.9rem}
+table.prog th, table.prog td{border:1px solid var(--line);padding:8px 10px;
+  text-align:left;vertical-align:top;white-space:nowrap}
+table.prog th{background:var(--panel2)}
+table.prog td{font-family:var(--mono)}
+table.prog .prog-date{color:var(--muted);font-weight:700}
+
 /* modal + toast */
 #modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;
   display:flex;align-items:center;justify-content:center;padding:18px}

@@ -65,6 +65,20 @@ check("Handler uses no raw db.* calls (UserDB only)",
 check("UserDB wrapper exists and is uid-bound",
       "class UserDB" in _src and "def __init__(self, uid)" in _src)
 _app_js = open(os.path.join(ROOT, "static", "app.js")).read()
+_index_html = open(os.path.join(ROOT, "static", "index.html")).read()
+check("progression tab exists in nav + view",
+      'id="nav-progression"' in _index_html
+      and 'id="view-progression"' in _index_html
+      and 'id="prog-schedule-picker"' in _index_html)
+check("progression: render builds Workout/Day/Exercise + merged Progression header",
+      "function renderProgression" in _app_js
+      and "loadProgression" in _app_js
+      and "colspan=" in _app_js and ">Progression<" in _app_js)
+check("progression: one row per exercise incl. removed ones, oldest first",
+      "addRow(w.day_index" in _app_js
+      and ".sort((a, b) => a.date < b.date" in _app_js)
+check("progression: cell is the date + one line per set",
+      "fmtShortDate(w.date)" in _app_js and "histValText(e)" in _app_js)
 check("beforeunload warns while a workout runs or save prompt is open",
       "addEventListener('beforeunload'" in _app_js
       and "e.returnValue" in _app_js)
