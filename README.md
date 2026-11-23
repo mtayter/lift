@@ -59,13 +59,13 @@ against the last time you did that day.
   for that exercise, and the inputs follow its measure (weight, band
   chips, or BW). Adding the rows that complete the day clears the
   ENDED EARLY badge.
-- **Progression** — one row per exercise: Workout (the schedule's
-  name), Day, Exercise, then one column per workout of that schedule
-  (oldest first) under a merged Progression header; each cell shows
-  the date and every set that day (weight × reps, band × reps, or
-  BW × reps). An exercise removed from the schedule keeps its row,
-  so its old progression stays visible. Schedule picker defaults to
-  the newest schedule.
+- **Progression** — one table per day (Day A, Day B…): Exercise in the
+  first column, then one column per workout of that day (oldest
+  first) under a merged Progression header, the dates as the column
+  headers; each cell shows just that day's sets (weight × reps, band
+  × reps, or BW × reps), one per line. An exercise removed from the
+  schedule keeps its row, so its old progression stays visible.
+  Schedule picker defaults to the newest schedule.
 
 ## Data access
 

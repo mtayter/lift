@@ -1152,8 +1152,8 @@ async function renderProgression() {
   const box = $('prog-table');
   const schedMeta = schedulesMeta.find(s => s.id === progScheduleId);
   if (!schedMeta) { box.innerHTML = ''; return; }
-  // The schedule's days (row order) + its workouts, oldest first so
-  // progression reads left to right. Both endpoints already exist.
+  // The schedule's days + its workouts, oldest first so progression
+  // reads left to right. Both endpoints already exist.
   const [schedR, histR] = await Promise.all([
     api('/schedules/' + schedMeta.id), api('/history')]);
   if (!schedR.body.ok) { box.innerHTML = ''; return; }
@@ -1165,17 +1165,24 @@ async function renderProgression() {
     box.innerHTML = '<p class="muted">No workouts logged for this schedule yet.</p>';
     return;
   }
-  // One row per exercise: the schedule's days first, in order, then
-  // any exercise that appears in this schedule's history but has
-  // since been removed from the schedule (e.g. Kneeling Ab Wheel),
-  // so its progression doesn't vanish with the edit.
-  const rows = [];
-  const seen = new Map();   // exercise id (or name) -> row
-  const addRow = (dayIndex, exId, name) => {
+  // One table per day: that day's own workouts become the columns, so
+  // a Day A exercise never has blank cells under Day B dates. Rows:
+  // the day's exercises in schedule order, then any exercise that
+  // appears in that day's history but has since been removed from it
+  // (e.g. Kneeling Ab Wheel), so its progression doesn't vanish.
+  const byDay = new Map();   // dayIndex -> {workouts, rows, seen}
+  const dayBucket = di => {
+    if (!byDay.has(di))
+      byDay.set(di, { workouts: [], rows: [], seen: new Map() });
+    return byDay.get(di);
+  };
+  for (const w of ws) dayBucket(w.day_index).workouts.push(w);
+  const addRow = (di, exId, name) => {
+    const b = dayBucket(di);
     const key = exId || ('name:' + name);
-    if (seen.has(key)) return seen.get(key);
-    const row = { dayIndex, exId, name: name || '', cells: new Map() };
-    seen.set(key, row); rows.push(row);
+    if (b.seen.has(key)) return b.seen.get(key);
+    const row = { exId, name: name || '', cells: new Map() };
+    b.seen.set(key, row); b.rows.push(row);
     return row;
   };
   (sched.days || []).forEach((day, di) => {
@@ -1184,37 +1191,49 @@ async function renderProgression() {
   for (const w of ws)
     for (const e of w.entries) addRow(w.day_index, e.exercise_id, e.exercise_name);
   for (const w of ws) {
+    const b = dayBucket(w.day_index);
     for (const e of w.entries) {
-      const row = seen.get(e.exercise_id || ('name:' + e.exercise_name));
+      const row = b.seen.get(e.exercise_id || ('name:' + e.exercise_name));
       if (!row) continue;
       if (!row.cells.has(w.id)) row.cells.set(w.id, []);
       row.cells.get(w.id).push(e);
     }
   }
-  const t = document.createElement('table');
-  t.className = 'prog';
-  const head = document.createElement('thead');
-  head.innerHTML = `<tr><th>Workout</th><th>Day</th><th>Exercise</th><th colspan="${ws.length}">Progression</th></tr>`;
-  t.appendChild(head);
-  const body = document.createElement('tbody');
-  for (const row of rows) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(schedMeta.name)}</td><td>${dayLabel(row.dayIndex)}</td><td>${esc(row.name) || '(unnamed)'}</td>`;
-    for (const w of ws) {
-      const td = document.createElement('td');
-      const sets = row.cells.get(w.id);
-      if (sets && sets.length) {
-        sets.sort((a, b) => (a.set_number || 0) - (b.set_number || 0));
-        td.innerHTML = `<span class="prog-date">${fmtShortDate(w.date)}</span>` +
-          sets.map(e => `<br>${histValText(e)}`).join('');
-      }
-      tr.appendChild(td);
-    }
-    body.appendChild(tr);
-  }
-  t.appendChild(body);
   box.innerHTML = '';
-  box.appendChild(t);
+  for (const di of [...byDay.keys()].sort((a, b) => a - b)) {
+    const b = byDay.get(di);
+    if (!b.workouts.length) continue;
+    const h = document.createElement('h3');
+    h.className = 'prog-day';
+    h.textContent = 'Day ' + dayLabel(di);
+    box.appendChild(h);
+    const wrap = document.createElement('div');
+    wrap.className = 'prog-wrap';
+    const t = document.createElement('table');
+    t.className = 'prog';
+    const head = document.createElement('thead');
+    head.innerHTML = `<tr><th rowspan="2">Exercise</th><th colspan="${b.workouts.length}">Progression</th></tr>` +
+      `<tr>${b.workouts.map(w => `<th>${fmtShortDate(w.date)}</th>`).join('')}</tr>`;
+    t.appendChild(head);
+    const body = document.createElement('tbody');
+    for (const row of b.rows) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(row.name) || '(unnamed)'}</td>`;
+      for (const w of b.workouts) {
+        const td = document.createElement('td');
+        const sets = row.cells.get(w.id);
+        if (sets && sets.length) {
+          sets.sort((a, b) => (a.set_number || 0) - (b.set_number || 0));
+          td.innerHTML = sets.map(e => histValText(e)).join('<br>');
+        }
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+    t.appendChild(body);
+    wrap.appendChild(t);
+    box.appendChild(wrap);
+  }
 }
 
 /* ---------- auto-update ----------
