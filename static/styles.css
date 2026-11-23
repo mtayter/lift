@@ -208,13 +208,12 @@ select{background:#0f1114;color:var(--text);border:1px solid var(--line);
 
 /* progression */
 .prog-wrap{overflow-x:auto;margin-top:10px}
-.prog-day{margin:18px 0 4px}
-.prog-day:first-child{margin-top:10px}
 table.prog{border-collapse:collapse;font-size:.9rem}
 table.prog th, table.prog td{border:1px solid var(--line);padding:8px 10px;
   text-align:left;vertical-align:top;white-space:nowrap}
 table.prog th{background:var(--panel2)}
 table.prog td{font-family:var(--mono)}
+table.prog th:first-child, table.prog td:first-child{white-space:normal;max-width:110px}
 
 /* modal + toast */
 #modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;

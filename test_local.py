@@ -66,16 +66,22 @@ check("UserDB wrapper exists and is uid-bound",
       "class UserDB" in _src and "def __init__(self, uid)" in _src)
 _app_js = open(os.path.join(ROOT, "static", "app.js")).read()
 _index_html = open(os.path.join(ROOT, "static", "index.html")).read()
+_styles_css = open(os.path.join(ROOT, "static", "styles.css")).read()
 check("progression tab exists in nav + view",
       'id="nav-progression"' in _index_html
       and 'id="view-progression"' in _index_html
       and 'id="prog-schedule-picker"' in _index_html)
-check("progression: one table per day, dates as headers, sets only in cells",
+check("progression: one table per day, day name in the header, dates as columns",
       "function renderProgression" in _app_js
       and "loadProgression" in _app_js
-      and "byDay" in _app_js and ">Progression<" in _app_js
-      and "fmtShortDate(w.date)" in _app_js
-      and "prog-date" not in _app_js)
+      and "byDay" in _app_js
+      and "Day ' + dayLabel(di)" in _app_js
+      and ">Progression<" not in _app_js
+      and "prog-day" not in _app_js
+      and "fmtShortDate(w.date)" in _app_js)
+check("progression: exercise column wraps to cut horizontal scroll",
+      "table.prog td:first-child" in _styles_css
+      and "max-width:110px" in _styles_css)
 check("progression: rows include removed exercises, oldest first",
       "addRow(w.day_index" in _app_js
       and ".sort((a, b) => a.date < b.date" in _app_js)

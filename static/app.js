@@ -1203,17 +1203,12 @@ async function renderProgression() {
   for (const di of [...byDay.keys()].sort((a, b) => a - b)) {
     const b = byDay.get(di);
     if (!b.workouts.length) continue;
-    const h = document.createElement('h3');
-    h.className = 'prog-day';
-    h.textContent = 'Day ' + dayLabel(di);
-    box.appendChild(h);
     const wrap = document.createElement('div');
     wrap.className = 'prog-wrap';
     const t = document.createElement('table');
     t.className = 'prog';
     const head = document.createElement('thead');
-    head.innerHTML = `<tr><th rowspan="2">Exercise</th><th colspan="${b.workouts.length}">Progression</th></tr>` +
-      `<tr>${b.workouts.map(w => `<th>${fmtShortDate(w.date)}</th>`).join('')}</tr>`;
+    head.innerHTML = `<tr><th>${'Day ' + dayLabel(di)}</th>${b.workouts.map(w => `<th>${fmtShortDate(w.date)}</th>`).join('')}</tr>`;
     t.appendChild(head);
     const body = document.createElement('tbody');
     for (const row of b.rows) {
