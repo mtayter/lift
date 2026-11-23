@@ -30,7 +30,10 @@ against the last time you did that day.
 - **Workout** — pick a schedule (defaults to the newest); today's day
   is picked by rotating from your last saved workout *on that
   schedule*. The timer auto-advances the highlight one set per rest
-  period, beeping 3 times at zero. With the timer off, there is no
+  period, beeping 3 times at zero. **Next set** starts the next set
+  early — it moves the highlight on and restarts the rest timer, so
+  sets finished faster than the timer still count when you end the
+  workout. With the timer off, there is no
   countdown — the highlight moves on when the reps for the current step
   are entered. Left column = last time you did
   this day on this schedule; right column = today's weight/reps (last

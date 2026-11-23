@@ -82,6 +82,14 @@ check("progression: one table per day, day name in the header, dates as columns"
 check("progression: exercise column wraps to cut horizontal scroll",
       "table.prog td:first-child" in _styles_css
       and "max-width:110px" in _styles_css)
+check("next-set button exists in the workout controls",
+      'id="btn-next-set"' in _index_html and "Next set" in _index_html)
+check("next set early: advances the highlight and restarts the rest",
+      "function nextSetEarly" in _app_js
+      and "$('btn-next-set').onclick = nextSetEarly" in _app_js
+      and "if (wo.timerEnabled) wo.deadline = Date.now() + wo.restSec * 1000" in _app_js)
+check("next set button disabled unless running with a next step",
+      "nb.disabled = !wo.running || wo.current >= wo.steps.length - 1" in _app_js)
 check("progression: rows include removed exercises, oldest first",
       "addRow(w.day_index" in _app_js
       and ".sort((a, b) => a.date < b.date" in _app_js)
