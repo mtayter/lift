@@ -90,6 +90,8 @@ check("next set early: advances the highlight and restarts the rest",
       and "if (wo.timerEnabled) wo.deadline = Date.now() + wo.restSec * 1000" in _app_js)
 check("next set button disabled unless running with a next step",
       "nb.disabled = !wo.running || wo.current >= wo.steps.length - 1" in _app_js)
+check("next set early beeps like the timer does",
+      "beep3()" in _app_js[_app_js.index("function nextSetEarly"):_app_js.index("$('btn-next-set').onclick")])
 check("progression: rows include removed exercises, oldest first",
       "addRow(w.day_index" in _app_js
       and ".sort((a, b) => a.date < b.date" in _app_js)

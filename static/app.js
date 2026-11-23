@@ -839,12 +839,13 @@ $('btn-end-early').onclick = () => { if (wo.running) finishWorkout(true); };
 function nextSetEarly() {
   // "Start the next set early": move the highlight on without waiting
   // for the rest timer, and give the next step a fresh full rest —
-  // the same advance the timer beep does, minus the beep. This is what
+  // the same advance the timer beep does, beep included. This is what
   // keeps the save complete when she finishes sets faster than the
   // timer: the highlight is the app's record of what's done, so
   // advancing it here means End Early can no longer drop sets she
   // already did. No-ops on the last step (button is disabled there).
   if (!wo.running || wo.current >= wo.steps.length - 1) return;
+  beep3();
   wo.current++;
   if (wo.timerEnabled) wo.deadline = Date.now() + wo.restSec * 1000;
   highlightStep();
