@@ -197,6 +197,14 @@ select{background:#0f1114;color:var(--text);border:1px solid var(--line);
 .hbtn{border-radius:7px;padding:9px 13px;font-weight:800;min-height:42px;
   border:1px solid var(--line);background:var(--panel2);flex:none}
 .hbtn.save{background:var(--accent);border-color:var(--accent-d);color:#14100c}
+.hbtn.add{background:transparent;color:var(--accent)}
+.hist-add{margin-top:8px}
+.hist-add .hrow.editing{margin-top:0}
+.hrow.editing select.hex{flex:1 1 120px;background:#0f1114;color:var(--text);
+  border:1px solid var(--line);border-radius:7px;padding:9px 7px;
+  font-family:var(--mono);font-size:.95rem;min-height:42px;min-width:0}
+.hrow.editing .hmid{display:flex;gap:10px;align-items:center}
+.hrow.editing input.hset{width:56px;flex:none}
 
 /* modal + toast */
 #modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;

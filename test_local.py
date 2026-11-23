@@ -97,6 +97,16 @@ check("timer resume: Start counts down from the time left, else a fresh rest",
       and "wo.resumeRemaining = null" in _app_js)
 check("timer resume: restored page shows the time left",
       "fmtClock(wo.resumeRemaining)" in _app_js)
+check("history add-set: POST /api/workouts/<id>/sets + UserDB method",
+      "def add_workout_set" in _src
+      and 'path.endswith("/sets")' in _src)
+check("history add-set: history exposes the saved day's exercises",
+      "day_exercises" in _src and "schedule_snapshot" in _src)
+check("history add-set: completing the day clears ended early",
+      "def counted_rows" in _src and "ended_early=0" in _src)
+check("history add-set: client form picks from the day, next set auto",
+      "histAddFormEl" in _app_js and "addingToId" in _app_js
+      and "nextSet" in _app_js)
 
 # ============ part 1: fresh v2 flow ============
 def version_checks():
@@ -239,6 +249,81 @@ try:
     check("edited values persist in history",
           a_workout["entries"][0]["weight"] == 105.5
           and a_workout["entries"][0]["exercise_name"] == "Bench Press")
+
+    # --- history: add a missing set to a workout ---
+    s, b = call("GET", "/api/history", headers=H)
+    a_workout = [w for w in b["workouts"] if w["day_label"] == "A"][0]
+    check("history exposes day_exercises from the saved day",
+          a_workout.get("day_exercises")
+          and {e["name"] for e in a_workout["day_exercises"]} >= {"Bench", "Curl"},
+          str(a_workout.get("day_exercises"))[:200])
+    wid = a_workout["id"]
+    n_before = len(a_workout["entries"])
+    s, b = call("POST", f"/api/workouts/{wid}/sets",
+                {"exercise_id": "bench1", "exercise_name": "Bench",
+                 "set_number": 3, "measure": "weight",
+                 "weight": 100, "reps": 8}, H)
+    check("add set to workout", b.get("ok") and b["entry"]["weight"] == 100
+          and b["entry"]["set_number"] == 3
+          and b["entry"]["seq"] == n_before, str(b)[:160])
+    s, b = call("GET", "/api/history", headers=H)
+    a_workout = [w for w in b["workouts"] if w["id"] == wid][0]
+    check("added set appears at the end of the workout",
+          len(a_workout["entries"]) == n_before + 1
+          and a_workout["entries"][-1]["exercise_name"] == "Bench"
+          and a_workout["entries"][-1]["set_number"] == 3)
+    s, b = call("POST", f"/api/workouts/{wid}/sets",
+                {"exercise_id": "bench1", "exercise_name": "Bench",
+                 "set_number": 0, "measure": "weight",
+                 "weight": 100, "reps": 8}, H)
+    check("add set with set_number 0 refused", s == 400)
+    s, b = call("POST", f"/api/workouts/{wid}/sets",
+                {"exercise_id": "bench1", "exercise_name": "Bench",
+                 "set_number": 4, "measure": "weight",
+                 "weight": -1, "reps": 8}, H)
+    check("add set with negative weight refused", s == 400)
+    s, b = call("POST", f"/api/workouts/{wid}/sets",
+                {"exercise_id": "bench1", "exercise_name": "Bench",
+                 "set_number": 4, "measure": "weight",
+                 "weight": 100, "reps": 8},
+                {"Content-Type": "application/json"})
+    check("add set requires auth", s == 401)
+    s, b = call("POST", f"/api/workouts/{wid}/sets",
+                {"exercise_id": "bench1", "exercise_name": "Bench",
+                 "set_number": 4, "measure": "weight",
+                 "weight": 100, "reps": 8}, H2)
+    check("other user's workout not addable (404)", s == 404)
+
+    # --- add-set clears ENDED EARLY when the day becomes complete ---
+    s, b = call("POST", "/api/schedules",
+                {"name": "EarlyTest", "schedule": {
+                    "rest_minutes": 2, "days": [{"exercises": [
+                        {"id": "sq1", "name": "Squat", "sets": 2}],
+                     "groups": {}}]}}, H)
+    check("early-test schedule created", b.get("ok"))
+    early_sid = b["id"]
+    s, b = call("POST", "/api/workouts",
+                {"schedule_id": early_sid, "day_index": 0,
+                 "date": "2026-11-07", "ended_early": True, "entries": [
+                     {"step_index": 0, "exercise_id": "sq1",
+                      "exercise_name": "Squat", "set_number": 1,
+                      "measure": "weight", "weight": 135, "reps": 5}]}, H)
+    check("partial workout saved early", b.get("ok"))
+    s, b = call("GET", "/api/history", headers=H)
+    early_w = [w for w in b["workouts"] if w["schedule_id"] == early_sid][0]
+    check("partial workout flagged ended early", early_w["ended_early"] is True)
+    s, b = call("POST", f"/api/workouts/{early_w['id']}/sets",
+                {"exercise_id": "sq1", "exercise_name": "Squat",
+                 "set_number": 2, "measure": "weight",
+                 "weight": 135, "reps": 5}, H)
+    check("add the missing set", b.get("ok"))
+    s, b = call("GET", "/api/history", headers=H)
+    early_w = [w for w in b["workouts"] if w["schedule_id"] == early_sid][0]
+    check("completing the day clears ended early",
+          early_w["ended_early"] is False
+          and len(early_w["entries"]) == 2)
+    s, b = call("DELETE", f"/api/schedules/{early_sid}", headers=H)
+    check("early-test schedule deleted", b.get("ok"))
 
     # --- band / bodyweight measures ---
     s, b = call("POST", "/api/schedules",

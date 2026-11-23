@@ -52,7 +52,13 @@ against the last time you did that day.
   + date, so a stale one is ignored, and it clears on Save, Discard,
   or logout.
 - **History** — every saved workout, newest first, tagged with its
-  schedule's name.
+  schedule's name. Tap any set row to edit it; each card also has
+  + Add set, which appends a missing set — pick the exercise from the
+  day as it was saved (so a set can be added for an exercise with no
+  rows yet in that workout), the set number defaults to the next one
+  for that exercise, and the inputs follow its measure (weight, band
+  chips, or BW). Adding the rows that complete the day clears the
+  ENDED EARLY badge.
 
 ## Data access
 

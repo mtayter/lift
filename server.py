@@ -45,6 +45,9 @@ Routes (an optional /lift prefix is stripped):
   GET    /api/history             -> all workouts, newest first           (auth)
   PUT    /api/workout-sets/<id>   {exercise_name, weight, reps, band?,
            measure?} -> edit one saved set in History (owner only)
+  POST   /api/workouts/<id>/sets  {exercise_id?, exercise_name, set_number,
+           group_id?, group_mode?, weight, band?, measure?, reps?}
+           -> add a set to a saved workout in History (owner only)
 """
 import copy as _copy
 import hashlib
@@ -344,6 +347,27 @@ def counted_sets(day):
     return total
 
 
+def counted_rows(day):
+    """Saved-set rows a full day prescribes: standalone = its sets;
+    group 'each' = sum of members' sets; group 'entire' = shared
+    rounds x members (one row per exercise per round). Used when a
+    set is added to a saved workout, to tell whether the day is now
+    complete and the ENDED EARLY flag should clear."""
+    total = 0
+    seen_groups = set()
+    for ex in day["exercises"]:
+        gid = ex["group_id"]
+        if gid is None:
+            total += ex["sets"]
+        elif gid not in seen_groups:
+            seen_groups.add(gid)
+            mode = (day.get("groups") or {}).get(gid, {}).get("mode", "each")
+            members = [e for e in day["exercises"] if e["group_id"] == gid]
+            total += (members[0]["sets"] * len(members) if mode == "entire"
+                      else sum(e["sets"] for e in members))
+    return total
+
+
 def fresh_exercise_ids(data):
     """Deep-copy schedule data with every exercise ID regenerated —
     used by Copy so the copy is history-independent."""
@@ -489,10 +513,29 @@ class UserDB:
                 (workout_id, self.uid)).fetchall()
 
     def workout_json(self, w):
+        # The day as it was saved, for the History "add set" picker:
+        # a set can be added for an exercise that has no rows yet in
+        # this workout (e.g. a superset round that never got saved).
+        day_ex = []
+        try:
+            day = json.loads(w["schedule_snapshot"] or "null")
+        except (ValueError, TypeError):
+            day = None
+        if isinstance(day, dict):
+            groups = day.get("groups") or {}
+            for ex in day.get("exercises") or []:
+                gid = ex.get("group_id")
+                day_ex.append({
+                    "id": ex.get("id"), "name": ex.get("name", ""),
+                    "measure": ex.get("measure") or "weight",
+                    "group_id": gid,
+                    "group_mode": (groups.get(gid, {}).get("mode", "each")
+                                   if gid else None)})
         return {"id": w["id"], "schedule_id": w["schedule_id"],
                 "schedule_name": w["schedule_name"],
                 "day_index": w["day_index"], "day_label": w["day_label"],
                 "date": w["date"], "ended_early": bool(w["ended_early"]),
+                "day_exercises": day_ex,
                 "entries": [dict(s) for s in self.sets_for_workout(w["id"])]}
 
     def insert_workout(self, sid, schedule_name, day_idx, date_str,
@@ -549,6 +592,56 @@ class UserDB:
                 " WHERE ws.id=? AND w.user_id=?",
                 (set_id, self.uid)).fetchone()
             return dict(row) if row else None
+
+    def add_workout_set(self, wid, exercise_id, name, set_number,
+                        group_id, group_mode, weight, band, measure, reps):
+        """Append one set to a saved workout (History "add set"). The
+        workout must be this user's; seq/step_index continue the
+        existing rows, so the new row lands at the end of the card.
+        If the added rows bring the workout up to the full day's set
+        count, the ENDED EARLY flag clears — same rule as the v2.7
+        server normalisation, counted in rows. Returns the new entry,
+        or None if the workout isn't this user's."""
+        with db_lock:
+            cur = db.execute(
+                "INSERT INTO workout_sets(workout_id,seq,step_index,"
+                "exercise_id,exercise_name,set_number,group_id,group_mode,"
+                "weight,band,measure,reps)"
+                " SELECT ?, (SELECT COALESCE(MAX(seq),-1)+1 FROM workout_sets"
+                " WHERE workout_id=?),"
+                " (SELECT COALESCE(MAX(step_index),-1)+1 FROM workout_sets"
+                " WHERE workout_id=?),"
+                " ?,?,?,?,?,?,?,?,?"
+                " WHERE EXISTS (SELECT 1 FROM workouts w"
+                " WHERE w.id=? AND w.user_id=?)",
+                (wid, wid, wid, exercise_id, name, set_number, group_id,
+                 group_mode, weight, band, measure, reps, wid, self.uid))
+            if cur.rowcount == 0:
+                return None
+            nid = cur.lastrowid
+            row = db.execute(
+                "SELECT schedule_snapshot FROM workouts"
+                " WHERE id=? AND user_id=?", (wid, self.uid)).fetchone()
+            if row and row["schedule_snapshot"]:
+                try:
+                    day = json.loads(row["schedule_snapshot"])
+                except ValueError:
+                    day = None
+                if isinstance(day, dict):
+                    n = db.execute(
+                        "SELECT COUNT(*) FROM workout_sets"
+                        " WHERE workout_id=?", (wid,)).fetchone()[0]
+                    if n >= counted_rows(day):
+                        db.execute(
+                            "UPDATE workouts SET ended_early=0"
+                            " WHERE id=? AND user_id=?", (wid, self.uid))
+            db.commit()
+            out = db.execute(
+                "SELECT ws.* FROM workout_sets ws"
+                " JOIN workouts w ON w.id = ws.workout_id"
+                " WHERE ws.id=? AND w.user_id=?",
+                (nid, self.uid)).fetchone()
+            return dict(out) if out else None
 
 
 # ---- HTTP handler (UserDB + auth bootstrap only; no raw db.* here) ----
@@ -840,6 +933,59 @@ class Handler(BaseHTTPRequestHandler):
                                      ended_early,
                                      sched["days"][day_idx], clean)
             return self._json(200, {"ok": True, "workout_id": wid})
+        if path.startswith("/api/workouts/") and path.endswith("/sets"):
+            udb = self._udb()
+            if not udb:
+                return self._json(401, {"ok": False})
+            try:
+                wid = int(path.split("/")[3])
+            except (IndexError, ValueError):
+                return self._json(404, {"ok": False})
+            p = self._json_body()
+            if p is None:
+                return self._json(400, {"ok": False})
+
+            def num(v, cast):
+                try:
+                    return cast(v) if v not in (None, "") else None
+                except (TypeError, ValueError):
+                    return "BAD"
+            name = str(p.get("exercise_name", ""))[:100].strip()
+            set_number = num(p.get("set_number"), int)
+            weight = num(p.get("weight"), float)
+            reps = num(p.get("reps"), int)
+            if not name or set_number in (None, "BAD") \
+                    or weight == "BAD" or reps == "BAD":
+                return self._json(400, {"ok": False,
+                                        "error": "name, set_number, weight/reps required and must be numbers"})
+            if not (1 <= set_number <= 20):
+                return self._json(400, {"ok": False,
+                                        "error": "set_number must be 1-20"})
+            if (weight is not None and weight < 0) or \
+               (reps is not None and reps < 0):
+                return self._json(400, {"ok": False,
+                                        "error": "weight/reps can't be negative"})
+            band = clean_band(p.get("band"))
+            measure = p.get("measure")
+            if measure not in ("weight", "band", "bodyweight"):
+                return self._json(400, {"ok": False,
+                                        "error": "measure must be weight, band or bodyweight"})
+            if band:
+                weight = None
+                measure = "band"
+            if measure == "bodyweight":
+                weight = None
+                band = None
+            entry = udb.add_workout_set(
+                wid,
+                str(p["exercise_id"])[:40] if p.get("exercise_id") else None,
+                name, set_number,
+                str(p["group_id"])[:40] if p.get("group_id") else None,
+                p.get("group_mode") if p.get("group_mode") in ("entire", "each") else None,
+                weight, band, measure, reps)
+            if entry is None:
+                return self._json(404, {"ok": False})
+            return self._json(200, {"ok": True, "entry": entry})
         return self._json(404, {"ok": False})
 
     def do_PUT(self):

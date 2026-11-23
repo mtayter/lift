@@ -921,11 +921,12 @@ window.addEventListener('beforeunload', e => {
 /* ---------- HISTORY ---------- */
 let histWorkouts = [];
 let editingSetId = null;   // workout_sets.id currently being edited, if any
+let addingToId = null;     // workout id with the "add set" form open, if any
 
 async function loadHistory() {
   const r = await api('/history');
   histWorkouts = r.body.workouts || [];
-  editingSetId = null;
+  editingSetId = null; addingToId = null;
   renderHistory();
 }
 function renderHistory() {
@@ -948,6 +949,15 @@ function renderHistory() {
     if (!w.entries.length) sets.innerHTML = '<span class="muted">No sets recorded</span>';
     for (const e of w.entries) sets.appendChild(histRowEl(e));
     card.appendChild(sets);
+    const foot = document.createElement('div'); foot.className = 'hist-add';
+    if (addingToId === w.id) foot.appendChild(histAddFormEl(w));
+    else {
+      const btn = document.createElement('button');
+      btn.className = 'hbtn add'; btn.textContent = '+ Add set';
+      btn.onclick = () => { addingToId = w.id; renderHistory(); };
+      foot.appendChild(btn);
+    }
+    card.appendChild(foot);
     list.appendChild(card);
   }
 }
@@ -1021,6 +1031,90 @@ function histRowEl(e) {
     }
   };
   return row;
+}
+function histAddFormEl(w) {
+  // Exercises to pick from: the day as it was saved (snapshot), so a
+  // set can be added for an exercise that has no rows yet in this
+  // workout — e.g. a superset round that never got saved. Falls back
+  // to the workout's own entries for legacy rows without a snapshot.
+  const dayEx = (w.day_exercises && w.day_exercises.length)
+    ? w.day_exercises
+    : [...new Map(w.entries.map(e => [e.exercise_id || e.exercise_name,
+        { id: e.exercise_id || null, name: e.exercise_name,
+          measure: e.measure || 'weight', group_id: e.group_id || null,
+          group_mode: e.group_mode || null }])).values()];
+  const form = document.createElement('div');
+  form.className = 'hrow editing hadd';
+  // Next set number for the picked exercise in this workout.
+  const nextSet = ex => Math.max(0, ...w.entries
+    .filter(e => ex.id ? e.exercise_id === ex.id : e.exercise_name === ex.name)
+    .map(e => e.set_number || 0)) + 1;
+  form.innerHTML = `<span class="hn">+</span>
+    <select class="hex" aria-label="Exercise">
+      ${dayEx.map((ex, i) => `<option value="${i}">${esc(ex.name) || '(unnamed)'}</option>`).join('')}
+    </select>
+    <input class="hnum hset" type="number" inputmode="numeric" step="1" min="1" max="20" value="1" aria-label="Set number">
+    <span class="hmid"></span>
+    <button class="hbtn save">Save</button>
+    <button class="hbtn cancel">Cancel</button>`;
+  const sel = form.querySelector('.hex');
+  const mid = form.querySelector('.hmid');
+  const setIn = form.querySelector('.hset');
+  // Value inputs follow the picked exercise's measure, like the edit
+  // row does; the set number defaults to the next set of that exercise.
+  const sync = () => {
+    const ex = dayEx[Number(sel.value)];
+    setIn.value = nextSet(ex);
+    if (ex.measure === 'bodyweight') {
+      mid.innerHTML = `<span class="bw-label">BW</span>
+        <input class="hnum hr" type="number" inputmode="numeric" step="1" min="0" placeholder="reps" aria-label="Reps">`;
+    } else if (ex.measure === 'band') {
+      mid.innerHTML = `<div class="band-picker">${['L', 'M', 'H'].map(b =>
+        `<button type="button" class="band-btn" data-b="${b}" aria-label="Band ${b}">${b}</button>`).join('')}</div>
+        <input class="hnum hr" type="number" inputmode="numeric" step="1" min="0" placeholder="reps" aria-label="Reps">`;
+      mid.querySelectorAll('.band-btn').forEach(btn =>
+        btn.onclick = () => btn.classList.toggle('on'));
+    } else {
+      mid.innerHTML = `<input class="hnum hw" type="number" inputmode="decimal" step="any" min="0" placeholder="wt" aria-label="Weight">
+        <input class="hnum hr" type="number" inputmode="numeric" step="1" min="0" placeholder="reps" aria-label="Reps">`;
+    }
+  };
+  sel.onchange = sync;
+  sync();
+  form.querySelector('.cancel').onclick = () => { addingToId = null; renderHistory(); };
+  form.querySelector('.save').onclick = async () => {
+    const ex = dayEx[Number(sel.value)];
+    const payload = {
+      exercise_id: ex.id, exercise_name: ex.name,
+      set_number: Number(setIn.value) || nextSet(ex),
+      group_id: ex.group_id, group_mode: ex.group_mode,
+      measure: ex.measure,
+      reps: mid.querySelector('.hr').value === '' ? null
+        : Number(mid.querySelector('.hr').value)
+    };
+    if (ex.measure === 'bodyweight') {
+      payload.weight = null; payload.band = null;
+    } else if (ex.measure === 'band') {
+      const picker = mid.querySelector('.band-picker');
+      payload.band = ['L', 'M', 'H']
+        .filter(b => picker.querySelector(`[data-b="${b}"]`).classList.contains('on'))
+        .join('+') || null;
+      payload.weight = null;
+    } else {
+      payload.band = null;
+      payload.weight = mid.querySelector('.hw').value === '' ? null
+        : Number(mid.querySelector('.hw').value);
+    }
+    const r = await api('/workouts/' + w.id + '/sets', jsonOpts('POST', payload));
+    if (r.body.ok) {
+      addingToId = null;
+      await loadHistory();
+      toast('Set added ✓');
+    } else {
+      toast('Add failed: ' + (r.body.error || 'unknown error'));
+    }
+  };
+  return form;
 }
 
 /* ---------- auto-update ----------
